@@ -9,11 +9,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PlatformTarget>x64</PlatformTarget>
-    <RootNamespace>GoogleSlidesNdiPresenter</RootNamespace>
-    <AssemblyName>GoogleSlidesNdiPresenter</AssemblyName>
+    <RootNamespace>PresentationPlayer</RootNamespace>
+    <AssemblyName>PresentationPlayer</AssemblyName>
     <!-- Release builds override this from the git tag (see .github/workflows/release.yml). -->
     <Version>1.7.0</Version>
-    <Product>Google Slides NDI Presenter</Product>
+    <Product>Presentation Player</Product>
+    <Title>Presentation Player</Title>
+    <AssemblyTitle>Presentation Player</AssemblyTitle>
+    <Company>neriftafu</Company>
+    <Copyright>Copyright © 2026 neriftafu</Copyright>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- The WebView2 package also ships its WPF control; this app only uses the WinForms one. -->
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
@@ -32,6 +36,7 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
     <PackageReference Include="NAudio.Asio" Version="2.2.1" />
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
   </ItemGroup>
 
 </Project>

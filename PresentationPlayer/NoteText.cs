@@ -2,7 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>A stretch of bold and/or italic text in the notes.</summary>
 public sealed record NoteStyle(int Start, int Length, bool Bold, bool Italic);

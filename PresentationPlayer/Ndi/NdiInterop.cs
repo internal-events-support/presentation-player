@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace GoogleSlidesNdiPresenter.Ndi;
+namespace PresentationPlayer.Ndi;
 
 /// <summary>Minimal P/Invoke bindings for the NDI runtime (Processing.NDI.Lib.x64.dll).</summary>
 internal static class NdiInterop

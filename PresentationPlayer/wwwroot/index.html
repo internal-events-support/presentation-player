@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#383838">
-  <title>Google Slides NDI Presenter</title>
+  <title>Presentation Player</title>
   <link rel="icon" href="/icon.svg">
   <link rel="stylesheet" href="/app.css">
 </head>
@@ -60,7 +60,7 @@
     <header class="topbar">
       <div class="topbar-left">
         <button class="btn btn-pill btn-icon only-mobile" id="menuBtn" type="button" aria-label="Presentations"><svg class="ic"><use href="#i-menu"/></svg></button>
-        <span class="app-title">Google Slides NDI Presenter</span>
+        <span class="app-title">Presentation Player</span>
       </div>
       <div class="deck">
         <div class="deck-row">
@@ -144,18 +144,19 @@
             <img src="/icon.svg" alt="">
             <div>
               <h1>Open a presentation</h1>
-              <p>Sends the live slides and a presenter view over NDI.</p>
+              <p>Google Slides, PowerPoint or PDF, with a presenter view.</p>
             </div>
           </div>
           <form class="url-form" id="emptyForm" autocomplete="off">
             <div class="url-row">
               <div class="url-field" id="emptyField">
                 <svg class="ic"><use href="#i-link"/></svg>
-                <input id="emptyUrl" type="text" spellcheck="false" placeholder="Paste a Google Slides link" aria-label="Google Slides link">
+                <input id="emptyUrl" type="text" spellcheck="false" placeholder="Paste a Google Slides link" aria-label="Google Slides link or file path">
               </div>
               <button class="btn btn-primary" type="submit" id="emptySubmit">Open</button>
+              <button class="btn" type="button" id="emptyBrowse" title="Open a PowerPoint or PDF file" hidden>Browse…</button>
             </div>
-            <p class="field-hint" id="emptyHint">The presentation must be shared as <b>Anyone with the link can view</b>.</p>
+            <p class="field-hint" id="emptyHint">Google Slides presentations must be shared as <b>Anyone with the link can view</b>, or with the account signed in here.</p>
           </form>
           <div class="join-recent" id="emptyMasterWrap">
             <div class="side-line"><h2>Master decks</h2><button class="btn btn-sm" id="emptyNewMaster" type="button" hidden>New master deck</button></div>
@@ -172,7 +173,9 @@
       <section class="stage" id="stageView">
         <div class="monitors">
           <figure class="monitor">
-            <figcaption class="monitor-head">Slides</figcaption>
+            <figcaption class="monitor-head">Slides
+              <span class="popup popup-sm out-pick" hidden><select data-output="slides" aria-label="Where to show the slides on this computer"></select></span>
+            </figcaption>
             <div class="screen">
               <img id="slidesStream" alt="Slides output">
               <div class="video-controls" id="videoControls" hidden>
@@ -205,7 +208,9 @@
             </div>
           </figure>
           <figure class="monitor">
-            <figcaption class="monitor-head">Presenter view</figcaption>
+            <figcaption class="monitor-head">Presenter view
+              <span class="popup popup-sm out-pick" hidden><select data-output="notes" aria-label="Where to show the presenter view on this computer"></select></span>
+            </figcaption>
             <div class="screen"><img id="notesStream" alt="Presenter view output"></div>
             <div class="mon-toolbar">
               <div class="seg" role="group" aria-label="Notes text size" title="Notes text size (− / +)">
@@ -243,13 +248,15 @@
       <h2>Open presentation</h2>
       <div class="url-field" id="openField">
         <svg class="ic"><use href="#i-link"/></svg>
-        <input id="openUrl" type="text" spellcheck="false" placeholder="Paste a Google Slides link" aria-label="Google Slides link">
+        <input id="openUrl" type="text" spellcheck="false" placeholder="Paste a Google Slides link" aria-label="Google Slides link or file path">
       </div>
       <button class="clip-suggest" id="clipSuggest" type="button" hidden>
         <svg class="ic"><use href="#i-clipboard"/></svg><span>Use link from clipboard</span><code id="clipText"></code>
       </button>
-      <p class="field-hint" id="openHint">The presentation must be shared as <b>Anyone with the link can view</b>.</p>
+      <p class="field-hint" id="openHint">Google Slides presentations must be shared as <b>Anyone with the link can view</b>, or with the account signed in here.</p>
       <footer class="modal-foot">
+        <button class="btn" type="button" id="openBrowse" title="Open a PowerPoint or PDF file" hidden>Browse…</button>
+        <span class="spacer"></span>
         <button class="btn" type="button" data-close>Cancel</button>
         <button class="btn btn-primary" id="openSubmit" value="default" type="submit">Open</button>
       </footer>
@@ -461,7 +468,10 @@
         <label class="master-name"><span>Name</span><input class="tf" id="masterName" maxlength="80" placeholder="Day 1 plenary"></label>
         <div class="master-add">
           <textarea class="tf" id="masterLinks" rows="2" spellcheck="false" placeholder="Paste one or more Google Slides links"></textarea>
-          <button class="btn" type="button" id="masterAdd">Add</button>
+          <div class="master-add-buttons">
+            <button class="btn" type="button" id="masterAdd">Add</button>
+            <button class="btn" type="button" id="masterBrowse" title="Add PowerPoint or PDF files">Browse…</button>
+          </div>
         </div>
         <div class="master-table" id="masterTable">
           <div class="master-row master-th">

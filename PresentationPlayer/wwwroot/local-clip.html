@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- A video on a slide of a PowerPoint file. Nothing is drawn until it plays, so the slide's own picture of it shows. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+    video { display: block; width: 100%; height: 100%; object-fit: fill; visibility: hidden; }
+    video.shown { visibility: visible; }
+  </style>
+</head>
+<body>
+  <script>
+    const q = new URLSearchParams(location.hash.slice(1));
+    const from = Number(q.get('from')), cut = Number(q.get('cut'));
+    const v = document.createElement('video');
+    v.src = 'media/' + encodeURIComponent(q.get('file'));
+    v.preload = 'auto';
+    v.loop = q.get('loop') === '1';
+    v.muted = q.get('muted') === '1';
+    v.volume = Number(q.get('volume'));
+    v.addEventListener('timeupdate', () => {
+      if (v.currentTime > from && !v.paused) v.classList.add('shown');
+      if (cut && isFinite(v.duration) && v.currentTime >= v.duration - cut) {
+        if (v.loop) v.currentTime = from; else v.pause();
+      }
+    });
+    v.addEventListener('playing', () => requestAnimationFrame(() => v.classList.add('shown')));
+    if (from) v.addEventListener('loadedmetadata', () => { v.currentTime = from; }, { once: true });
+    document.body.append(v);
+    window.addEventListener('message', e => {
+      if (e.data === 'stop') { v.pause(); v.currentTime = from; v.classList.remove('shown'); }
+    });
+  </script>
+</body>
+</html>

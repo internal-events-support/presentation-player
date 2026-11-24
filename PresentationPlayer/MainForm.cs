@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// The app window: a native frame hosting the web UI (served by <see cref="ApiServer"/>)
@@ -21,19 +21,21 @@ public sealed class MainForm : Form
     private readonly ApiServer _api;
     private readonly AudioRouter _audio;
     private readonly GoogleAccount _google;
+    private readonly DisplayOutputs _displays;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Background };
     private LivePresenter? _live;
     private bool _ownFrame = true; // the UI draws the title bar
 
-    public MainForm(PresentationController controller, AppSettings settings, ApiServer api, AudioRouter audio, GoogleAccount google)
+    public MainForm(PresentationController controller, AppSettings settings, ApiServer api, AudioRouter audio, GoogleAccount google, DisplayOutputs displays)
     {
+        _displays = displays;
         _google = google;
         _audio = audio;
         _controller = controller;
         _settings = settings;
         _api = api;
 
-        Text = "Google Slides NDI Presenter";
+        Text = "Presentation Player";
         Icon = AppIcon.Create();
         BackColor = TopBar;
         Padding = new Padding(0, TopEdge, 0, 0);
@@ -42,7 +44,12 @@ public sealed class MainForm : Form
         RestorePlacement();
         Controls.Add(_web);
 
-        Shown += async (_, _) => await StartAsync();
+        Shown += async (_, _) =>
+        {
+            _displays.AppWindow = Handle;
+            _displays.Start();
+            await StartAsync();
+        };
         // Keyboard shortcuts and presentation clickers should work as soon as the window is active.
         Activated += (_, _) => _web.Focus();
     }
@@ -95,6 +102,18 @@ public sealed class MainForm : Form
     {
         if (_web.CoreWebView2 is { } core)
             core.PostWebMessageAsString(WindowState == FormWindowState.Maximized ? "window:maximized" : "window:normal");
+    }
+
+    /// <summary>Asks for a presentation file (or several).</summary>
+    public Task<string[]> BrowseAsync(bool many)
+    {
+        var chosen = new TaskCompletionSource<string[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        BeginInvoke(() =>
+        {
+            using var dialog = new OpenFileDialog { Filter = LocalDecks.DialogFilter, Multiselect = many, Title = many ? "Add presentations" : "Open presentation" };
+            chosen.TrySetResult(dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileNames : []);
+        });
+        return chosen.Task;
     }
 
     private void OnUiMessage(string message)
@@ -199,6 +218,13 @@ public sealed class MainForm : Form
             string message;
             try { message = e.TryGetWebMessageAsString(); }
             catch (ArgumentException) { return; } // not a string
+            if (message == "drop")
+            {
+                // Files dropped on the window: only their names are sent to the page, so it's told where they are.
+                var paths = e.AdditionalObjects.OfType<CoreWebView2File>().Select(f => f.Path).ToList();
+                core.PostWebMessageAsString("files:" + System.Text.Json.JsonSerializer.Serialize(paths));
+                return;
+            }
             OnUiMessage(message);
         };
         core.NavigationCompleted += (_, e) =>
@@ -275,7 +301,7 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Win11 dark caption that matches the app background (falls back to plain dark mode on Win10).</summary>
-    private static class DarkTitleBar
+    internal static class DarkTitleBar
     {
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);

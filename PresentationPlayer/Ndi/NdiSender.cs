@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace GoogleSlidesNdiPresenter.Ndi;
+namespace PresentationPlayer.Ndi;
 
 /// <summary>
 /// An NDI video source that continuously re-sends the most recent frame, without alpha, at a fixed frame rate

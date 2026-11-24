@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
-namespace GoogleSlidesNdiPresenter.Ndi;
+namespace PresentationPlayer.Ndi;
 
 /// <summary>
 /// Points this app's NDI senders at a discovery server.
@@ -46,7 +46,7 @@ public static partial class NdiConfig
         networks["discovery"] = servers;
 
         var dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GoogleSlidesNdiPresenter", "ndi");
+            AppFolders.Local, "ndi");
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, FileName), config.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         Environment.SetEnvironmentVariable("NDI_CONFIG_DIR", dir);

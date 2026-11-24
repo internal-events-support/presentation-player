@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Google Slides NDI Presenter — app UI
+   Presentation Player — app UI
    Same design system as GMeet ISO and the CasparCG client (macOS dark appearance):
    unified top bar · presentations panel · output cards and slide strip · status bar.
    ========================================================================== */
@@ -336,7 +336,7 @@ kbd {
 
 /* Output cards grow to fill the stage: as wide as the columns allow, but no taller than the space left. */
 .monitors {
-  --card-extra: 76px; /* heading, toolbar, gaps and padding around the picture */
+  --card-extra: 78px; /* heading, toolbar, gaps and padding around the picture */
   flex: 100 1 auto; min-height: 220px; /* the cards take the space first; the strip gets the rest */
   /* never taller than the width allows, so spare height goes to the strip instead of between */
   max-height: calc(((100cqw - 8px) / 2 - 16px) * 9 / 16 + var(--card-extra));
@@ -348,7 +348,13 @@ kbd {
   background: var(--output-card-bg); border-radius: var(--r-md); box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
   width: min(calc((100cqw - 8px) / 2), calc((100cqh - var(--card-extra)) * 16 / 9 + 16px));
 }
-.monitor-head { display: flex; align-items: center; height: 18px; font-size: var(--fs-sm); font-weight: 700; }
+.monitor-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 20px; font-size: var(--fs-sm); font-weight: 700; white-space: nowrap; }
+.popup-sm { height: 20px; }
+.popup-sm select { padding: 0 20px 0 7px; font-size: var(--fs-xs); font-weight: 400; }
+.out-pick { max-width: 60%; }
+.out-pick select { color: var(--text-2); field-sizing: content; }
+.out-pick.is-on select { color: var(--text); }
+.out-pick.is-missing select { color: var(--yellow); }
 .screen { position: relative; aspect-ratio: 16 / 9; border-radius: 3px; overflow: hidden; background: var(--well); }
 .screen img { width: 100%; height: 100%; object-fit: contain; }
 .mon-toolbar { display: flex; align-items: center; gap: 6px; height: 30px; min-width: 0; }
@@ -488,7 +494,8 @@ kbd {
 .master-name .tf { flex: 1; }
 .master-add { display: flex; gap: 8px; align-items: stretch; }
 .master-add .tf { flex: 1; height: auto; padding: 6px 8px; resize: none; font: inherit; line-height: 1.4; }
-.master-add .btn { height: auto; min-width: 72px; }
+.master-add-buttons { display: flex; flex-direction: column; gap: 6px; }
+.master-add .btn { flex: 1; min-width: 84px; }
 .master-table { background: var(--table-row-bg); border-radius: var(--r-md); overflow: hidden; }
 .master-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) 96px 96px 104px 28px; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--sep); }
 .master-th { padding: 5px 10px; background: var(--table-header-bg); border-top: 0; font-size: var(--fs-xs); font-weight: 500; }

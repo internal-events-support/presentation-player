@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// A video or audio clip on a slide, as set up in Google Slides. Slide is the slide's number in the

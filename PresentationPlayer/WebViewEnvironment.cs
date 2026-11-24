@@ -1,6 +1,6 @@
 using Microsoft.Web.WebView2.Core;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// One WebView2 environment shared by the main window UI and the offscreen live player
@@ -18,7 +18,7 @@ public static class WebViewEnvironment
         static Task<CoreWebView2Environment> Create()
         {
             var userData = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GoogleSlidesNdiPresenter", "WebView2");
+                AppFolders.Local, "WebView2");
             var options = new CoreWebView2EnvironmentOptions(
                 "--autoplay-policy=no-user-gesture-required " +
                 "--disable-features=CalculateNativeWinOcclusion " +

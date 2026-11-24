@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// The optional Google sign-in, used to open decks that are shared with a person rather than
@@ -332,7 +332,7 @@ public sealed partial class GoogleAccount(AppSettings settings) : PresentationLo
             _env = env;
             _url = url;
             _closeOnceSignedIn = closeOnceSignedIn;
-            Text = closeOnceSignedIn ? "Sign in to Google – Google Slides NDI Presenter" : "Request access – Google Slides NDI Presenter";
+            Text = closeOnceSignedIn ? "Sign in to Google – Presentation Player" : "Request access – Presentation Player";
             Icon = owner?.Icon;
             StartPosition = owner == null ? FormStartPosition.CenterScreen : FormStartPosition.CenterParent;
             ClientSize = closeOnceSignedIn ? new Size(520, 720) : new Size(960, 720);

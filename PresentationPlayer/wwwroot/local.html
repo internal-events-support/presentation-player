@@ -1,0 +1,157 @@
+<!doctype html>
+<!-- Plays a PDF or PowerPoint file. It stands in for Google's player: the app drives it with the same
+     keys, and reads the slide from the same places (the class names, the slide in the address). -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Presentation</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    /* The same margin and bar as Google's player, which the app crops off. */
+    #stage { position: absolute; inset: 1px 1px 37px; }
+    .slide { position: absolute; inset: 0; visibility: hidden; }
+    .slide.on { visibility: visible; }
+    .slide img { position: absolute; inset: 0; margin: auto; width: 100%; height: 100%; object-fit: contain; }
+    .clips { position: absolute; inset: 0; margin: auto; }
+    iframe { position: absolute; border: 0; background: transparent; }
+    .punch-viewer-navbar { position: absolute; left: 0; right: 0; bottom: 0; height: 36px; }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+  <div class="punch-viewer-navbar"><div class="punch-viewer-navbar-page"><span id="pos" style="visibility:hidden"></span></div></div>
+  <script>
+    (async () => {
+      'use strict';
+      const stage = document.getElementById('stage'), pos = document.getElementById('pos');
+      const { pages } = await (await fetch('deck.json')).json();
+      if (!pages.length) return;
+      const layers = new Map();   // slide → its element
+      let at = -1, used = 0;      // the slide, and the clicks used on it
+      let clips = [];             // what's on it
+
+      const layer = i => {
+        if (i < 0 || i >= pages.length) return null;
+        if (!layers.has(i)) {
+          const el = document.createElement('div');
+          el.className = 'slide';
+          const img = new Image();
+          img.src = pages[i].image;
+          el.append(img);
+          el.ready = img.decode().catch(() => {});
+          layers.set(i, el);
+          stage.append(el);
+        }
+        return layers.get(i);
+      };
+
+      const show = (i, clicks) => {
+        at = i;
+        used = clicks;
+        for (const c of clips) c.remove();
+        clips = [];
+        const url = new URL(location.href);
+        url.searchParams.set('slide', 'id.' + pages[i].id);
+        history.replaceState(null, '', url);
+        pos.setAttribute('aria-setsize', pages.length);
+        pos.textContent = i + 1;
+        const el = layer(i);
+        el.ready.then(() => {
+          if (at !== i) return;
+          for (const l of layers.values()) l.classList.toggle('on', l === el);
+          layer(i + 1);
+          layer(i - 1);
+          for (const [n, l] of layers) if (Math.abs(n - i) > 3) { l.remove(); layers.delete(n); }
+          addClips(el, pages[i]);
+        });
+      };
+
+      const addClips = (el, page) => {
+        const img = el.querySelector('img');
+        const scale = Math.min(el.clientWidth / (img.naturalWidth || 16), el.clientHeight / (img.naturalHeight || 9));
+        const box = document.createElement('div');
+        box.className = 'clips';
+        box.style.width = (img.naturalWidth || 16) * scale + 'px';
+        box.style.height = (img.naturalHeight || 9) * scale + 'px';
+        el.append(box);
+        let clicks = 0;
+        clips = page.clips.map(c => {
+          const item = c.kind === 'audio' && c.file ? audio(c) : video(c, box);
+          item.click = c.start === 'on click' ? ++clicks : 0;
+          if (c.start === 'automatic') item.play();
+          return item;
+        });
+        clips.push({ remove: () => box.remove(), play() {}, stop() {} });
+      };
+
+      const audio = c => {
+        const a = new Audio('media/' + encodeURIComponent(c.file));
+        a.loop = c.loop;
+        a.muted = c.muted;
+        a.volume = c.volume;
+        document.body.append(a);
+        trim(a, c.from, c.cut);
+        return { play: () => { a.play().catch(() => {}); }, stop: () => { a.pause(); a.currentTime = c.from; }, remove: () => { a.pause(); a.remove(); } };
+      };
+      const trim = (m, from, cut) => {
+        if (from) m.addEventListener('loadedmetadata', () => { m.currentTime = from; }, { once: true });
+        if (cut) m.addEventListener('timeupdate', () => {
+          if (!isFinite(m.duration) || m.currentTime < m.duration - cut) return;
+          if (m.loop) m.currentTime = from; else m.pause();
+        });
+      };
+
+      // Videos play in frames of their own, like they do in Google's player.
+      const video = (c, box) => {
+        const f = document.createElement('iframe');
+        f.allow = 'autoplay; encrypted-media';
+        Object.assign(f.style, { left: c.x * 100 + '%', top: c.y * 100 + '%', width: c.w * 100 + '%', height: c.h * 100 + '%' });
+        let loaded = false, wanted = null;
+        const tell = what => { wanted = what; if (loaded && f.contentWindow) f.contentWindow.postMessage({ gsVideo: what }, '*'); };
+        f.onload = () => { loaded = true; if (wanted) setTimeout(() => tell(wanted), c.youTube ? 800 : 0); };
+        if (c.youTube) {
+          f.referrerPolicy = 'strict-origin-when-cross-origin';
+          const open = play => { f.src = `https://www.youtube.com/embed/${c.youTube}?enablejsapi=1&rel=0&controls=0&playsinline=1${play ? '&autoplay=1' : ''}${c.muted ? '&mute=1' : ''}`; };
+          open(c.start === 'automatic');
+          box.append(f);
+          return { play: () => tell('play'), stop: () => tell('pause'), remove: () => f.remove() };
+        }
+        f.src = 'clip#' + new URLSearchParams({ file: c.file, loop: c.loop ? 1 : 0, muted: c.muted ? 1 : 0, volume: c.volume, from: c.from, cut: c.cut });
+        box.append(f);
+        return { play: () => tell('play'), stop: () => f.contentWindow && f.contentWindow.postMessage('stop', '*'), remove: () => f.remove() };
+      };
+
+      const steps = i => pages[i].clips.filter(c => c.start === 'on click').length;
+      const next = () => {
+        if (used < steps(at)) {
+          used++;
+          const c = clips.find(c => c.click === used);
+          if (c) c.play();
+        } else if (at + 1 < pages.length) show(at + 1, 0);
+      };
+      const previous = () => {
+        if (used > 0) {
+          const c = clips.find(c => c.click === used);
+          if (c) c.stop();
+          used--;
+        } else if (at > 0) show(at - 1, 0);
+      };
+
+      let typed = '';
+      document.addEventListener('keydown', e => {
+        if (e.key === 'ArrowRight') next();
+        else if (e.key === 'ArrowLeft') previous();
+        else if (/^[0-9]$/.test(e.key)) typed += e.key;
+        else if (e.key === 'Enter' && typed) {
+          const n = Number(typed);
+          typed = '';
+          if (n >= 1 && n <= pages.length) show(n - 1, 0);
+        }
+      });
+
+      const wanted = new URLSearchParams(location.search).get('slide') || '';
+      show(Math.max(0, pages.findIndex(p => 'id.' + p.id === wanted)), 0);
+    })();
+  </script>
+</body>
+</html>

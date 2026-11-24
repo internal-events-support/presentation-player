@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>A slide as the live player needs to know it.</summary>
 public sealed record LivePage(string PageId, int PlayerNumber, int ClickSteps, bool StartsByItself);

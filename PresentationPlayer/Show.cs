@@ -1,4 +1,4 @@
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>One deck in a master deck. SkipStart/SkipEnd leave out that many slides from its start and end.</summary>
 public sealed class MasterPart

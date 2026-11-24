@@ -1,7 +1,7 @@
 using System.Threading.Channels;
-using GoogleSlidesNdiPresenter.Ndi;
+using PresentationPlayer.Ndi;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 public sealed record PresentationState(
     string Url,
@@ -10,7 +10,7 @@ public sealed record PresentationState(
     long Version,       // increments on every successful load (cache-busts slide thumbnails)
     long? LoadedRevision,   // Google's revision number of the deck as loaded (null if unknown)
     long? LatestRevision,   // newest revision seen while polling Google every 30 s
-    bool OutOfDate,         // the deck has been edited in Google Slides since it was loaded
+    bool OutOfDate,         // the deck has been edited since it was loaded
     int ThumbnailCount, // slides with a thumbnail available (/api/slides/{n}.jpg)
     int Slide,          // 1-based, 0 when nothing is loaded
     int SlideCount,
@@ -39,12 +39,15 @@ public sealed record PresentationState(
     bool IsMaster,                      // a master deck (several decks played as one) is open
     string? DeckId,                     // Google's id of the deck the current slide is from
     string? PageId,                     // and of the slide itself
-    IReadOnlyList<int> Skipped,         // numbers of the slides that are skipped (hidden in Google Slides)
+    IReadOnlyList<int> Skipped,         // numbers of the slides that are skipped (hidden)
     IReadOnlyList<ShowPart> Parts,      // the decks the show is made of, and where each starts
     IReadOnlyList<int> MissingPictures, // numbers of the slides whose picture hasn't arrived yet
     bool GoogleExpired,                 // Google has ended the session: sign in again
     string NextPreview,                 // width of the next slide in the presenter view: full or half
-    IReadOnlyList<MasterDeck> MasterDecks);
+    IReadOnlyList<MasterDeck> MasterDecks,
+    IReadOnlyList<DisplayInfo> Displays, // this computer's displays
+    OutputStatus? SlidesOutput,          // where the slides are shown on them
+    OutputStatus? NotesOutput);          // and the presenter view
 
 /// <summary>
 /// Owns the presentation state and pushes rendered frames to the two NDI senders.
@@ -93,6 +96,7 @@ public sealed class PresentationController : IDisposable
     private bool _loadingRefresh;
     private string _status = "Ready";
     private Bitmap? _slideFrame;
+    private byte[]? _slideBytes, _notesBytes;
     private Bitmap? _notesFrame;
     private PresenterBackground? _background;
     private long _frameVersion;
@@ -109,6 +113,11 @@ public sealed class PresentationController : IDisposable
     private readonly Dictionary<(int Index, int Width), byte[]> _thumbCache = new();
 
     public event Action? StateChanged;
+
+    /// <summary>A new output frame (BGRA). Raised with the controller's lock held, so handlers mustn't wait for anything.</summary>
+    public event Action<OutputKind, byte[]>? FrameChanged;
+
+    public DisplayOutputs? Displays { get; set; }
 
     public string? NdiError { get; }
 
@@ -226,7 +235,10 @@ public sealed class PresentationController : IDisposable
                 _show?.Strip.Select((s, i) => (s, i)).Where(x => x.s.Slide.Picture.Quality < PictureQuality.Preview).Select(x => x.i + 1).ToList() ?? [],
                 _googleExpired,
                 _settings.NextPreview,
-                _settings.MasterDecks.ToList());
+                _settings.MasterDecks.ToList(),
+                Displays?.List() ?? [],
+                Displays?.Status(OutputKind.Slides),
+                Displays?.Status(OutputKind.Notes));
         }
     }
 
@@ -365,7 +377,7 @@ public sealed class PresentationController : IDisposable
     public async Task LoadAsync(string? url = null, CancellationToken ct = default)
     {
         url = (url ?? _url).Trim();
-        if (url.Length == 0) throw new ArgumentException("No Google Slides URL set.");
+        if (url.Length == 0) throw new ArgumentException("No presentation set.");
 
         await _loadGate.WaitAsync(ct);
         try
@@ -389,7 +401,8 @@ public sealed class PresentationController : IDisposable
                 _status = "Loading presentation…";
                 // A single deck starts loading in the player straight away. A master deck's player needs to
                 // know its slides first, so whatever is on screen stays until everything has downloaded.
-                if (master == null && id != null && _live != null)
+                // Nor does the player have a file to play until it's been read.
+                if (master == null && id != null && _live != null && !LocalDecks.IsLocal(id))
                 {
                     var same = id == _liveId;
                     if (!same) { _liveCount = 0; _liveSlide = 0; _liveSlideParam = null; }
@@ -424,6 +437,7 @@ public sealed class PresentationController : IDisposable
             Task liveReady = Task.CompletedTask;
             lock (_lock)
             {
+                LocalDecks.Keep(loaded.Parts.Select(p => p.DeckId).ToHashSet());
                 // Refreshing stays on the same slide, even if slides were added before it.
                 var was = CurrentLocked;
                 var sameShow = _show?.Id == loaded.Id;
@@ -457,6 +471,16 @@ public sealed class PresentationController : IDisposable
                 }
                 else
                 {
+                    if (LocalDecks.IsLocal(loaded.Id) && _live != null)
+                    {
+                        _index = keep >= 0 ? keep : sameShow ? Math.Clamp(_index, 0, Math.Max(0, loaded.Slides.Count - 1)) : 0;
+                        _liveId = loaded.Id;
+                        _liveCount = 0; // hold the output until the player is on the slide
+                        _liveSlide = 0;
+                        _liveSlideParam = null;
+                        _video = null;
+                        _live.Load(loaded.Id, loaded.Slides.Count > 0 ? "id." + loaded.Slides[_index].Slide.PageId : null);
+                    }
                     if (_live == null && keep >= 0) _index = keep;
                     else if (_live == null && !sameShow) _index = 0;
                     else if (_liveCount > 0) _index = LiveIndexLocked() ?? _index;
@@ -737,9 +761,26 @@ public sealed class PresentationController : IDisposable
     private bool HasDeckLocked => _show != null || _liveCount > 0;
 
     // Caller must hold _lock.
+    private void Send(OutputKind kind, Bitmap frame)
+    {
+        var bytes = FrameRenderer.ToBgra(frame);
+        if (kind == OutputKind.Slides) _slideBytes = bytes;
+        else _notesBytes = bytes;
+        (kind == OutputKind.Slides ? _slidesSender : _notesSender)?.SetFrame(bytes);
+        FrameChanged?.Invoke(kind, bytes);
+    }
+
+    /// <summary>Hands over the frame an output is showing (BGRA; not to be changed), before any newer one.</summary>
+    public void SendFrame(OutputKind kind, Action<byte[]> to)
+    {
+        lock (_lock)
+            if ((kind == OutputKind.Slides ? _slideBytes : _notesBytes) is { } frame) to(frame);
+    }
+
+    // Caller must hold _lock.
     private void SetSlideFrame(Bitmap frame)
     {
-        _slidesSender?.SetFrame(FrameRenderer.ToBgra(frame));
+        Send(OutputKind.Slides, frame);
         _slideFrame?.Dispose();
         _slideFrame = frame;
         Interlocked.Increment(ref _frameVersion);
@@ -751,7 +792,7 @@ public sealed class PresentationController : IDisposable
         if (!HasDeckLocked)
         {
             var holding = FrameRenderer.RenderHolding(HoldingScene.Presenter, _width, _height);
-            _notesSender?.SetFrame(FrameRenderer.ToBgra(holding));
+            Send(OutputKind.Notes, holding);
             _notesFrame?.Dispose();
             _notesFrame = holding;
             Interlocked.Increment(ref _frameVersion);
@@ -775,7 +816,7 @@ public sealed class PresentationController : IDisposable
         var notes = _slideFrame != null
             ? FrameRenderer.ComposePresenter(_background, _slideFrame)
             : new Bitmap(_background.Bitmap);
-        _notesSender?.SetFrame(FrameRenderer.ToBgra(notes));
+        Send(OutputKind.Notes, notes);
         _notesFrame?.Dispose();
         _notesFrame = notes;
         Interlocked.Increment(ref _frameVersion);
@@ -929,6 +970,8 @@ public sealed class PresentationController : IDisposable
     }
 
     private void OnChanged() => StateChanged?.Invoke();
+
+    public void NotifyChanged() => OnChanged();
 
     public void Dispose()
     {

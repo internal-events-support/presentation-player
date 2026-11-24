@@ -39,7 +39,7 @@ jobs:
       - name: Build a single self-contained exe
         shell: pwsh
         run: >
-          dotnet publish GoogleSlidesNdiPresenter -c Release -r win-x64 --self-contained
+          dotnet publish PresentationPlayer -c Release -r win-x64 --self-contained
           -p:PublishSingleFile=true
           -p:IncludeNativeLibrariesForSelfExtract=true
           -p:EnableCompressionInSingleFile=true
@@ -52,6 +52,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $asset = "GoogleSlidesNdiPresenter-${{ steps.version.outputs.version }}-win-x64.exe"
-          Copy-Item publish/GoogleSlidesNdiPresenter.exe $asset
+          $asset = "PresentationPlayer-${{ steps.version.outputs.version }}-win-x64.exe"
+          Copy-Item publish/PresentationPlayer.exe $asset
           gh release upload "${{ steps.version.outputs.tag }}" $asset --clobber --repo "${{ github.repository }}"

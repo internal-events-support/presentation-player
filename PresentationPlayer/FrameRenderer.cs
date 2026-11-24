@@ -3,7 +3,7 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>The static parts of the presenter (notes) frame, plus where the live current slide goes.</summary>
 public sealed class PresenterBackground : IDisposable
@@ -84,7 +84,7 @@ public static class FrameRenderer
 
         var (title, sub) = scene == HoldingScene.Slides
             ? ("The presentation will begin shortly", "")
-            : ("No presentation open", "Open a Google Slides deck in Google Slides NDI Presenter");
+            : ("No presentation open", "Open a presentation in Presentation Player");
 
         using var center = new StringFormat { Alignment = StringAlignment.Center };
         using var titleFont = new Font("Segoe UI Semibold", 52 * u, FontStyle.Regular, GraphicsUnit.Pixel);
@@ -119,17 +119,18 @@ public static class FrameRenderer
         using var ms = new MemoryStream(bytes);
         using var img = Image.FromStream(ms);
 
-        var cropH = (float)img.Height * frame.ContentHeight / frame.ViewportHeight;
-        var src = new RectangleF(0, 0, img.Width, Math.Min(img.Height, cropH));
+        var (sx, sy) = ((float)img.Width / frame.ViewportWidth, (float)img.Height / frame.ViewportHeight);
+        var src = new RectangleF(frame.Margin * sx, frame.Margin * sy,
+            (frame.ViewportWidth - 2 * frame.Margin) * sx, (frame.ContentHeight - 2 * frame.Margin) * sy);
 
         var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(bmp);
         g.Clear(Color.Black);
-        g.InterpolationMode = src.Width == width && Math.Abs(src.Height - height) < 1
+        g.InterpolationMode = Math.Abs(src.Width - width) < 0.01f && Math.Abs(src.Height - height) < 1
             ? InterpolationMode.NearestNeighbor
             : InterpolationMode.Bilinear;
         g.PixelOffsetMode = PixelOffsetMode.Half;
-        g.DrawImage(img, FitRect(src.Size, new RectangleF(0, 0, width, height)), src, GraphicsUnit.Pixel);
+        Draw(g, img, FitRect(src.Size, new RectangleF(0, 0, width, height)), src);
         return bmp;
     }
 
@@ -308,7 +309,15 @@ public static class FrameRenderer
     {
         g.InterpolationMode = mode;
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-        g.DrawImage(img, FitRect(img.Size, area));
+        Draw(g, img, FitRect(img.Size, area), new RectangleF(0, 0, img.Width, img.Height));
+    }
+
+    // Without the mirroring, scaling mixes the edges of the picture with the black around it.
+    private static void Draw(Graphics g, Image img, RectangleF dest, RectangleF src)
+    {
+        using var edges = new ImageAttributes();
+        edges.SetWrapMode(WrapMode.TileFlipXY);
+        g.DrawImage(img, [dest.Location, new PointF(dest.Right, dest.Y), new PointF(dest.X, dest.Bottom)], src, GraphicsUnit.Pixel, edges);
     }
 
     private static RectangleF FitRect(SizeF src, RectangleF area)

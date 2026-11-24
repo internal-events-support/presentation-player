@@ -1,6 +1,6 @@
 using System.Drawing.Text;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// Wraps and draws notes, with bold and italic text (GDI+ can only draw one style at a time), starting

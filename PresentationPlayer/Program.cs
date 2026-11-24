@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 internal static class Program
 {
@@ -22,13 +22,14 @@ internal static class Program
         PresentationLoader.Google = google;
         var controller = new PresentationController(settings);
         google.Changed += () => controller.SetGoogleExpired(google.Expired);
+        var displays = new DisplayOutputs(controller, settings);
         var audio = new AudioRouter();
         audio.Configure(settings);
         MainForm? form = null;
         ApiServer api;
         try
         {
-            api = ApiServer.StartAsync(controller, settings, audio, google, () =>
+            api = ApiServer.StartAsync(controller, settings, audio, google, displays, many => form?.BrowseAsync(many) ?? Task.FromResult<string[]>([]), () =>
             {
                 _restartRequested = true;
                 form?.BeginInvoke(form.Close);
@@ -37,13 +38,16 @@ internal static class Program
         catch (Exception ex)
         {
             MessageBox.Show("The app couldn't start its control server.\n\n" + ex.Message,
-                "Google Slides NDI Presenter", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                "Presentation Player", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            displays.Dispose();
             controller.Dispose();
             audio.Dispose();
             return;
         }
 
-        Application.Run(form = new MainForm(controller, settings, api, audio, google));
+        Application.Run(form = new MainForm(controller, settings, api, audio, google, displays));
+
+        displays.Dispose();
 
         settings.Save();
         api.DisposeAsync().AsTask().GetAwaiter().GetResult();

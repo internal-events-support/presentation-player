@@ -1,9 +1,11 @@
-# Google Slides NDI Presenter
+# Presentation Player
 
-This is a Windows app for running a Google Slides deck into a vision mixer over NDI. It sends two sources:
+This is a Windows app for running presentations at events. It opens Google Slides decks, PowerPoint files and PDFs, and has two outputs:
 
-- **GSlides Slides** is the presentation itself at 1080p, with animations, transitions and video playing as they would in Slides.
-- **GSlides Notes** is a presenter view: the current slide, the next slide and your speaker notes.
+- **Slides** is the presentation itself. Google Slides decks play with their animations, transitions and video.
+- **Presenter view** is the current slide, the next slide and your speaker notes.
+
+Both are sent over NDI (as **Presentation Slides** and **Presentation Notes**), and each can also be shown full screen on a display or in a window.
 
 You drive it from the app window, the keyboard, a presentation clicker, a phone on the same network, or over HTTP from something like Companion or a Stream Deck.
 
@@ -12,43 +14,66 @@ You drive it from the app window, the keyboard, a presentation clicker, a phone 
 - Windows 10 (version 2004 or later) or Windows 11, 64-bit.
 - The NDI 6 runtime. Installing [NDI Tools](https://ndi.video/tools/) gets you this.
 - The Microsoft Edge WebView2 runtime. Windows 11 already has it.
+- For PowerPoint files, PowerPoint or [LibreOffice](https://www.libreoffice.org/) (free). Not needed for Google Slides or PDFs.
 - The [.NET 9 SDK](https://dotnet.microsoft.com/download) if you're building from source.
 
-The simplest setup is a deck shared as "Anyone with the link can view", which works without signing in. For decks that are only shared with particular people, sign in to a Google account that can open them (see [Private decks](#private-decks)).
+For Google Slides, the simplest setup is a deck shared as "Anyone with the link can view", which works without signing in. For decks that are only shared with particular people, sign in to a Google account that can open them (see [Private decks](#private-decks)).
 
 ## Download
 
-Grab `GoogleSlidesNdiPresenter-<version>-win-x64.exe` from the [Releases](https://github.com/internal-events-support/google-slides-ndi-presenter/releases) page. It's a single file with everything bundled, so there's nothing to install beyond the NDI and WebView2 runtimes above. Windows SmartScreen may warn you the first time because the exe isn't code-signed.
+Grab `PresentationPlayer-<version>-win-x64.exe` from the [Releases](https://github.com/internal-events-support/google-slides-ndi-presenter/releases) page. It's a single file with everything bundled, so there's nothing to install beyond the NDI and WebView2 runtimes above. Windows SmartScreen may warn you the first time because the exe isn't code-signed.
 
 ## Building and running
 
 ```bash
-dotnet run -c Release --project GoogleSlidesNdiPresenter
+dotnet run -c Release --project PresentationPlayer
 ```
 
 To make a folder you can copy to another PC:
 
 ```bash
-dotnet publish GoogleSlidesNdiPresenter -c Release -r win-x64 --self-contained -o publish
+dotnet publish PresentationPlayer -c Release -r win-x64 --self-contained -o publish
 ```
 
 ## Using it
 
-Paste the deck's share link (the normal `docs.google.com/presentation/d/.../edit` one) and press Open. The two monitors in the middle of the window show exactly what each NDI source is sending.
+Paste the deck's share link (the normal `docs.google.com/presentation/d/.../edit` one) and press Open. For a PowerPoint or PDF file press Browse, drop it on the window, or paste its path. The two monitors in the middle of the window show exactly what each output is showing.
 
 Next and Previous behave like a clicker: Next plays the slide's next animation and only moves on once there are none left. Click any slide in the strip at the bottom to jump to it, or type its number and press Enter.
 
 Under the presenter view there's a text size control for the notes, an Auto-fit switch that makes each slide's notes as big as will fit, and buttons to scroll long notes. Bold and italic text in the notes is shown that way. Settings → Presenter view sets whether the next slide is as wide as the current one or half that.
 
-Slides skipped in Google Slides are dimmed in the strip and marked Skipped. They aren't shown, but they keep their number, so the numbers match Google Slides.
+Slides skipped in Google Slides, or hidden in PowerPoint, are dimmed in the strip and marked Skipped. They aren't shown, but they keep their number, so the numbers match.
 
 If a slide has a video or audio clip, a Play button appears on the slide monitor with how far through it is, next to a button that takes it back to the start. Audio set to play on click in Slides only starts when you press Play here. While the slide is making any sound, a small level meter shows on the right of the monitor.
 
 The (i) next to the deck's name lists every slide with video or audio: what it is, whether it starts automatically, on click or manually, whether its sound is muted, and whether it can actually play. Slides only plays a Drive video or audio file for people who can open that file, even if they can open the deck, so a clip that isn't shared with the Google account signed in here (or publicly) shows as "No access". Click it to open Google's "You need access" page on that account, with Viewer picked, and press Request access to ask the owner. The same button appears on the message you get when the presentation itself can't be opened. YouTube videos that are private, removed or not allowed to be embedded are flagged too. When anything can't play, the (i) turns red. It's worth a look before the show so nothing catches you out.
 
-If someone edits the deck in Google Slides while it's open, the app notices within about 30 seconds: the Refresh button, under the open deck in the list on the left, gets an amber dot and a message pops up. Press Refresh to pull the changes in. You stay on the slide you were on. The app never refreshes by itself, so nothing changes on air until you decide. Close (Ctrl+W) puts both outputs back to a holding screen ("The presentation will begin shortly" on the slides feed). If you close by accident, the message that pops up has a Reopen button.
+If someone edits the deck in Google Slides, or saves the file, while it's open, the app notices within about 30 seconds: the Refresh button, under the open deck in the list on the left, gets an amber dot and a message pops up. Press Refresh to pull the changes in. You stay on the slide you were on. The app never refreshes by itself, so nothing changes on air until you decide. Close (Ctrl+W) puts both outputs back to a holding screen ("The presentation will begin shortly" on the slides feed). If you close by accident, the message that pops up has a Reopen button.
 
 The app remembers recent decks, the last one you had open, your notes settings and the window position.
+
+### Displays and windows
+
+The menu at the top right of each monitor in the app sets where that output is shown on this computer, as well as on NDI:
+
+- **Full screen** on any of the displays connected to the computer. If the other output is already on that display they swap.
+- **Window**, which can be moved and resized, and captured or shared by other software.
+- **No display**, which is how it starts.
+
+It's remembered for next time. If a display is unplugged, its output closes, the menu says it isn't connected, and the output comes back when the display does. The computer won't go to sleep while an output is open.
+
+To leave full screen press Esc or double-click it, or pick No display. The presenting keys below work in the output windows too, so a clicker works whichever is in front.
+
+### PowerPoint and PDF files
+
+PDF pages are shown as slides. There are no notes.
+
+PowerPoint files (.pptx, .ppsx, .pptm, .ppsm) have their notes and hidden slides. The slides are drawn by PowerPoint if it's on the computer, otherwise by LibreOffice, the first time the file is opened and again after it changes. PowerPoint's own are exact; LibreOffice's can differ in places, mostly fonts, so look through them first. Slides are still pictures with everything on them, so animations and transitions don't play.
+
+Video and audio do play: by themselves, on a click of Next, or with the Play button, as they're set up in the file, with their trimming, volume and looping. MP4 (H.264), WebM, MP3, M4A and WAV clips work, and YouTube videos. The (i) list flags anything that won't play, such as WMV.
+
+Files can be in master decks along with Google Slides decks. Phones and the API can open files that have been opened in the app before, but not others.
 
 ### Keyboard
 
@@ -75,11 +100,11 @@ Settings → Remote control shows one or more addresses. Open one in a browser o
 
 ## Master decks
 
-A master deck plays several presentations as one, without copying anything into a combined deck. Press + next to Master decks, give it a name, and paste the links in the order they'll be shown. For each one you can skip a number of slides from its start and from its end, for example to leave out a title slide and a Q&A slide. Those are counts from each end rather than slide numbers, so slides added in the middle of a presentation come along by themselves. Slides hidden in Google Slides don't count.
+A master deck plays several presentations as one, without copying anything into a combined deck. Press + next to Master decks, give it a name, and paste the links, or browse for files, in the order they'll be shown. For each one you can skip a number of slides from its start and from its end, for example to leave out a title slide and a Q&A slide. Those are counts from each end rather than slide numbers, so slides added in the middle of a presentation come along by themselves. Hidden slides don't count.
 
-Only the links are saved. The slides are pulled fresh each time you open the master deck, and Refresh picks up edits to any of its presentations, keeping your place. The app tells you when one of them has been edited.
+Only the links (and where the files are) are saved. The slides are pulled fresh each time you open the master deck, and Refresh picks up edits to any of its presentations, keeping your place. The app tells you when one of them has been edited.
 
-Moving from one presentation to the next is a straight cut, because the next one is already loaded out of sight. If the next slide starts with a video or sound, that starts when you get there. Numbers, jumping to a slide and the presenter view's next slide all run through the whole master deck, and the strip shows where each presentation starts. Everything in it has to be public or shared with the signed-in account.
+Moving from one presentation to the next is a straight cut, because the next one is already loaded out of sight. If the next slide starts with a video or sound, that starts when you get there. Numbers, jumping to a slide and the presenter view's next slide all run through the whole master deck, and the strip shows where each presentation starts. Google decks in it have to be public or shared with the signed-in account.
 
 ## Private decks
 
@@ -123,12 +148,12 @@ Settings also covers the NDI source names, output resolution and frame rate, the
 
 If your network uses an NDI discovery server, put its address in **Discovery server** (for example `192.168.1.10`, or `ndi-ds.local:5959` if it isn't on the default port; separate several with commas). Leave it empty and NDI finds receivers automatically, the same as before. The setting only applies to this app. Everything else from NDI Access Manager (groups, adapters, multicast and so on) still applies, and other NDI apps on the PC aren't affected.
 
-Everything is saved in `%APPDATA%\GoogleSlidesNdiPresenter\settings.json`.
+Everything is saved in `%APPDATA%\PresentationPlayer\settings.json`. Settings and the Google sign-in from when the app was called Google Slides NDI Presenter are brought along the first time.
 
 To run a second copy with different source names and its own port, give it its own settings file:
 
 ```bash
-GoogleSlidesNdiPresenter.exe --settings "C:\path\to\second-settings.json"
+PresentationPlayer.exe --settings "C:\path\to\second-settings.json"
 ```
 
 ## HTTP API
@@ -139,7 +164,7 @@ The app listens on port 8080 by default. Every action takes a GET or a POST and 
 |---|---|
 | `/api/next`, `/api/previous` | Next / previous (`/api/prev` works too) |
 | `/api/goto/{n}` | Go to slide n, counting from 1 |
-| `/api/load?url=...` | Open a presentation. You can also POST `{"url": "..."}`. For a master deck use `master:` and its name, e.g. `master:Day 1 plenary` |
+| `/api/load?url=...` | Open a presentation. You can also POST `{"url": "..."}`. For a master deck use `master:` and its name, e.g. `master:Day 1 plenary`. For a file that's been opened before, its full path |
 | `/api/refresh` | Reload the open presentation |
 | `/api/close` | Close it and show the holding screen |
 | `/api/video/play`, `/pause`, `/toggle`, `/restart` | Control the video or audio on the current slide |
@@ -150,7 +175,7 @@ The app listens on port 8080 by default. Every action takes a GET or a POST and 
 | `GET /api/state` | The current state |
 | `GET /api/preview/slide.png`, `/notes.png` | A still of each output |
 
-The state includes `outOfDate`, which is true when the deck has been edited in Google Slides since it was opened or last refreshed.
+The state includes `outOfDate`, which is true when the deck has been edited since it was opened or last refreshed.
 
 Some of what the app's own interface uses could also be handy elsewhere: `/api/events` (state as Server-Sent Events), `/api/meter` (audio levels), `/api/stream/slide.mjpg` and `/notes.mjpg` (live previews), `/api/slides/{n}.jpg` (slide thumbnails) and `/api/masters` (the saved master decks).
 
@@ -164,6 +189,10 @@ The list of slides, the speaker notes and which slides are skipped come from the
 
 Google keeps a revision number for every deck that goes up each time it's edited. While a deck is open, the app reads it from the deck's page every 30 seconds, and if it's higher than when you opened or refreshed the deck, the deck is out of date.
 
+PowerPoint and PDF files play in a page of the app's own that behaves like Google's player. PDF pages are drawn by Windows. Converted PowerPoint files are kept in `%LOCALAPPDATA%\PresentationPlayer\Converted`.
+
+The display windows draw the same frames that go to NDI, scaled by the graphics card.
+
 Videos are locked to the best quality Google offers for them. Google sets that limit, though; the Drive video in the test deck, for example, only goes up to 720p.
 
 For audio, a small script inside the player routes each video's sound into the app instead of the speakers. The app then plays it on the devices you picked.
@@ -172,12 +201,13 @@ NDI reports connections rather than receivers, and each receiver opens two, so t
 
 ## Cutting a release
 
-Bump `<Version>` in `GoogleSlidesNdiPresenter.csproj`, then publish a release on GitHub with a tag like `v1.2.0`. The Release workflow builds the exe from that tag (taking the version from the tag) and attaches it to the release a few minutes later. If an asset ever needs rebuilding, run the workflow by hand from the Actions tab and give it the tag.
+Bump `<Version>` in `PresentationPlayer.csproj`, then publish a release on GitHub with a tag like `v1.2.0`. The Release workflow builds the exe from that tag (taking the version from the tag) and attaches it to the release a few minutes later. If an asset ever needs rebuilding, run the workflow by hand from the Actions tab and give it the tag.
 
 ## Known limitations
 
 - "Publish to web" links (the ones with `/d/e/` in them) can't be used. Use the share link instead.
 - Google's sign-in page can refuse to work inside apps. If it ever does, share the deck as "Anyone with the link can view" instead.
+- Animations and transitions in PowerPoint files don't play, and files with a password can't be opened.
 - The next-slide preview shows the slide as it looks once all its animations have played.
 - The slides feed goes through JPEG compression on the way out of the browser, so very fine detail can soften slightly.
 - If Google won't let the app capture a slide's audio file, it still plays, but straight to the Windows default device rather than the ones picked in Settings → Audio.

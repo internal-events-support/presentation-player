@@ -1,7 +1,7 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 public sealed record AudioDevice(string Id, string Name, bool IsDefault);
 

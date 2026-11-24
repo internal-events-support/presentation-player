@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 public sealed class RecentPresentation
 {
@@ -20,15 +20,15 @@ public sealed class WindowPlacement
     public bool Maximized { get; set; }
 }
 
-/// <summary>Persisted user settings, stored in %APPDATA%\GoogleSlidesNdiPresenter\settings.json.</summary>
+/// <summary>Persisted user settings, stored in %APPDATA%\PresentationPlayer\settings.json.</summary>
 public sealed class AppSettings
 {
     public string LastUrl { get; set; } = "";
     public float NotesFontSize { get; set; } = 48;
     public bool AutoFitNotes { get; set; }
     public int ApiPort { get; set; } = 8080;
-    public string SlidesNdiName { get; set; } = "GSlides Slides";
-    public string NotesNdiName { get; set; } = "GSlides Notes";
+    public string SlidesNdiName { get; set; } = "Presentation Slides";
+    public string NotesNdiName { get; set; } = "Presentation Notes";
     /// <summary>NDI discovery server(s), comma separated ("host" or "host:port"). Empty = automatic discovery.</summary>
     public string NdiDiscoveryServer { get; set; } = "";
     public int Width { get; set; } = 1920;
@@ -50,31 +50,24 @@ public sealed class AppSettings
     public string NextPreview { get; set; } = "full";
     /// <summary>The Google account last signed in, to notice when Google has signed it out. Empty after signing out here.</summary>
     public string GoogleEmail { get; set; } = "";
+    /// <summary>Where the outputs are shown on this computer, besides NDI.</summary>
+    public OutputPlacement SlidesOutput { get; set; } = new();
+    public OutputPlacement NotesOutput { get; set; } = new();
     public List<RecentPresentation> Recent { get; set; } = [];
     public List<MasterDeck> MasterDecks { get; set; } = [];
     public WindowPlacement? Window { get; set; }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    internal static readonly string DefaultFilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GoogleSlidesNdiPresenter", "settings.json");
+    internal static readonly string DefaultFilePath = Path.Combine(AppFolders.Roaming, "settings.json");
 
     /// <summary>The settings file in use; overridden with the --settings command-line option.</summary>
     public static string FilePath { get; set; } = DefaultFilePath;
-
-    // Where settings lived before the app was renamed from "GSlideNdi".
-    private static readonly string LegacyFilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GSlideNdi", "settings.json");
 
     public static AppSettings Load()
     {
         try
         {
-            if (FilePath == DefaultFilePath && !File.Exists(FilePath) && File.Exists(LegacyFilePath))
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-                File.Copy(LegacyFilePath, FilePath);
-            }
             if (File.Exists(FilePath))
                 return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new AppSettings();
         }
@@ -89,8 +82,11 @@ public sealed class AppSettings
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOptions));
+            lock (JsonOptions) // saved from several threads
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+                File.WriteAllText(FilePath, JsonSerializer.Serialize(this, JsonOptions));
+            }
         }
         catch
         {

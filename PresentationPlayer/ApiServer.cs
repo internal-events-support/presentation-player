@@ -15,7 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// Serves the app UI (also used as the web remote) and the REST API for remote control
@@ -52,23 +52,23 @@ public sealed partial class ApiServer : IAsyncDisposable
         Warning = warning;
     }
 
-    public static async Task<ApiServer> StartAsync(PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, Action requestRestart)
+    public static async Task<ApiServer> StartAsync(PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, DisplayOutputs displays, Func<bool, Task<string[]>> browse, Action requestRestart)
     {
         var host = settings.RemoteAccess ? "0.0.0.0" : "127.0.0.1";
         try
         {
-            return await StartOnAsync(controller, settings, audio, google, requestRestart, $"http://{host}:{settings.ApiPort}", settings.RemoteAccess, null);
+            return await StartOnAsync(controller, settings, audio, google, displays, browse, requestRestart, $"http://{host}:{settings.ApiPort}", settings.RemoteAccess, null);
         }
         catch (Exception ex) when (ex is IOException or SocketException || ex.InnerException is SocketException)
         {
             // Keep the UI working on a random local port; remote control is unavailable.
-            return await StartOnAsync(controller, settings, audio, google, requestRestart, "http://127.0.0.1:0", false,
+            return await StartOnAsync(controller, settings, audio, google, displays, browse, requestRestart, "http://127.0.0.1:0", false,
                 $"Port {settings.ApiPort} is already in use, so remote control is off. Pick another port in Settings.");
         }
     }
 
     private static async Task<ApiServer> StartOnAsync(
-        PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, Action requestRestart,
+        PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, DisplayOutputs displays, Func<bool, Task<string[]>> browse, Action requestRestart,
         string url, bool remote, string? warning)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
@@ -106,6 +106,7 @@ public sealed partial class ApiServer : IAsyncDisposable
         app.MapGet("/app.css", () => Asset("app.css", "text/css; charset=utf-8"));
         app.MapGet("/app.js", () => Asset("app.js", "text/javascript; charset=utf-8"));
         app.MapGet("/icon.svg", () => Asset("icon.svg", "image/svg+xml"));
+        LocalDecks.Map(app, Asset);
 
         // ---- State ----
         app.MapGet("/api/state", State);
@@ -122,14 +123,23 @@ public sealed partial class ApiServer : IAsyncDisposable
         }, Json));
 
         // ---- Presentation ----
-        app.MapMethods("/api/load", getPost, async (HttpRequest req) =>
+        app.MapMethods("/api/load", getPost, async (HttpContext ctx) =>
         {
+            var req = ctx.Request;
             string? loadUrl = req.Query["url"];
             if (string.IsNullOrWhiteSpace(loadUrl) && req.HasJsonContentType())
                 loadUrl = (await req.ReadFromJsonAsync<LoadRequest>(Json))?.Url;
             if (string.IsNullOrWhiteSpace(loadUrl))
                 return Results.BadRequest(new { error = "Provide a url (query string or JSON body {\"url\": \"...\"})." });
+            if (!Privileged(ctx) && LocalDecks.PathOf(loadUrl) is { } path && (loadUrl = KnownFile(controller, path)) == null)
+                return Results.Json(new { error = "Files can only be opened from the app itself the first time. After that they can be opened from here." }, Json, statusCode: StatusCodes.Status403Forbidden);
             return await RunLoad(controller, loadUrl);
+        });
+        // Lets the user choose files on this computer.
+        app.MapPost("/api/browse", async (HttpContext ctx, bool? many) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            return Results.Json(new { files = await browse(many ?? false) }, Json);
         });
         app.MapMethods("/api/refresh", getPost, () => RunLoad(controller, null));
         app.MapMethods("/api/close", getPost, async () => { await controller.CloseAsync(); return State(); });
@@ -179,6 +189,16 @@ public sealed partial class ApiServer : IAsyncDisposable
             return Results.NoContent();
         });
 
+        // ---- Outputs on this computer's displays (desktop window only) ----
+        app.MapPut("/api/outputs/{output}", async (HttpContext ctx, string output) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (output is not ("slides" or "notes")) return Results.NotFound();
+            var dto = await ctx.Request.ReadFromJsonAsync<OutputDto>(Json);
+            var error = displays.Set(output == "slides" ? OutputKind.Slides : OutputKind.Notes, dto?.Mode ?? "off", dto?.Display);
+            return error == null ? State() : Results.BadRequest(new { error });
+        });
+
         // ---- Notes ----
         app.MapMethods("/api/notes/increase", getPost, () => { controller.IncreaseNotesSize(); return State(); });
         app.MapMethods("/api/notes/decrease", getPost, () => { controller.DecreaseNotesSize(); return State(); });
@@ -215,7 +235,7 @@ public sealed partial class ApiServer : IAsyncDisposable
             foreach (var p in deck.Parts)
             {
                 if (PresentationLoader.ExtractId(p.Url) == null)
-                    return Results.BadRequest(new { error = $"That isn't a Google Slides link: {p.Url}" });
+                    return Results.BadRequest(new { error = $"That isn't a Google Slides link or a file: {p.Url}" });
                 p.SkipStart = Math.Clamp(p.SkipStart, 0, 9999);
                 p.SkipEnd = Math.Clamp(p.SkipEnd, 0, 9999);
             }
@@ -311,6 +331,7 @@ public sealed partial class ApiServer : IAsyncDisposable
 
         await app.StartAsync();
         var port = new Uri(app.Urls.First().Replace("0.0.0.0", "127.0.0.1")).Port;
+        LocalDecks.Port = port;
         server = new ApiServer(app, port, remote, warning);
         return server;
     }
@@ -432,6 +453,17 @@ public sealed partial class ApiServer : IAsyncDisposable
         catch (IOException) { }
     }
 
+    /// <summary>
+    /// Remotes, and web pages in a browser on this computer, can use the API without permission. They can
+    /// open files that have been opened in the app before, but not look through the computer (or the network).
+    /// </summary>
+    private static string? KnownFile(PresentationController controller, string path)
+    {
+        var state = controller.GetState();
+        return state.Recent.Select(r => r.Url).Concat(state.MasterDecks.SelectMany(m => m.Parts).Select(p => p.Url)).Append(state.Url)
+            .FirstOrDefault(known => string.Equals(LocalDecks.PathOf(known), path, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static async Task<IResult> RunLoad(PresentationController controller, string? url)
     {
         try
@@ -484,6 +516,7 @@ public sealed partial class ApiServer : IAsyncDisposable
             .Distinct();
 
     private sealed record LoadRequest(string? Url);
+    private sealed record OutputDto(string? Mode, string? Display);
     private sealed record PresenterDto(string? NextPreview);
     private sealed record RequestAccessDto(string? Kind, string? Id);
 

@@ -2,10 +2,10 @@ using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
-/// <summary>A frame captured from the live player: JPEG data plus how much of the viewport is slide content.</summary>
-public sealed record LiveFrame(string Base64Jpeg, int ContentHeight, int ViewportHeight);
+/// <summary>A frame captured from the live player: JPEG data, how much of the viewport is slide content, and the margin around that.</summary>
+public sealed record LiveFrame(string Base64Jpeg, int ContentHeight, int ViewportWidth, int ViewportHeight, int Margin);
 
 /// <summary>
 /// State of the video or audio on the current slide. Kind is "video" or "audio"; State is playing,
@@ -26,6 +26,8 @@ public sealed class DeckPlayer : IDisposable
 {
     // The embed player reserves a navbar strip at the bottom; make the viewport taller and crop it off.
     private const int NavbarAllowance = 36;
+    // And it leaves this much around the slide, which would be a dark line at the edge of the output.
+    private const int Margin = 1;
 
     private readonly HostForm _host;
     private readonly WebView2 _web;
@@ -71,12 +73,15 @@ public sealed class DeckPlayer : IDisposable
         }
     }
 
+    private int ViewportWidth => _width + 2 * Margin;
+    private int ViewportHeight => _height + 2 * Margin + NavbarAllowance;
+
     private DeckPlayer(int width, int height)
     {
         _width = width;
         _height = height;
-        _contentHeight = height;
-        _host = new HostForm(new Size(width, height + NavbarAllowance));
+        _contentHeight = height + 2 * Margin;
+        _host = new HostForm(new Size(ViewportWidth, ViewportHeight));
         _web = new WebView2 { Dock = DockStyle.Fill };
         _host.Controls.Add(_web);
         _host.Show();
@@ -128,8 +133,8 @@ public sealed class DeckPlayer : IDisposable
             "{\"patterns\":[{\"urlPattern\":\"https://*.google.com/*\",\"resourceType\":\"Media\",\"requestStage\":\"Request\"}]}");
         await core.CallDevToolsProtocolMethodAsync("Emulation.setDeviceMetricsOverride", JsonSerializer.Serialize(new
         {
-            width = _width,
-            height = _height + NavbarAllowance,
+            width = ViewportWidth,
+            height = ViewportHeight,
             deviceScaleFactor = 1,
             mobile = false,
         }));
@@ -138,7 +143,9 @@ public sealed class DeckPlayer : IDisposable
     public void Load(string presentationId, string? slideParam)
     {
         OnUi(() => { _deckId = presentationId; Ready = false; PageId = null; LastFrame = null; LastVideo = null; });
-        var url = $"https://docs.google.com/presentation/d/{Uri.EscapeDataString(presentationId)}/embed?start=false&loop=false&delayms=60000";
+        var url = LocalDecks.IsLocal(presentationId)
+            ? LocalDecks.PlayerUrl(presentationId)
+            : $"https://docs.google.com/presentation/d/{Uri.EscapeDataString(presentationId)}/embed?start=false&loop=false&delayms=60000";
         if (!string.IsNullOrEmpty(slideParam)) url += "&slide=" + Uri.EscapeDataString(slideParam);
         OnUi(() => _web.CoreWebView2?.Navigate(url));
     }
@@ -207,8 +214,8 @@ public sealed class DeckPlayer : IDisposable
             {
                 format = "jpeg",
                 quality = 92,
-                maxWidth = _width,
-                maxHeight = _height + NavbarAllowance,
+                maxWidth = ViewportWidth,
+                maxHeight = ViewportHeight,
                 everyNthFrame = 1,
             }));
         }
@@ -291,7 +298,7 @@ public sealed class DeckPlayer : IDisposable
         }
         // Ack right away so Chromium keeps streaming; consumers keep only the latest frame.
         _ = _web.CoreWebView2?.CallDevToolsProtocolMethodAsync("Page.screencastFrameAck", $"{{\"sessionId\":{sessionId}}}");
-        LastFrame = new LiveFrame(data, _contentHeight, _height + NavbarAllowance);
+        LastFrame = new LiveFrame(data, _contentHeight, ViewportWidth, ViewportHeight, Margin);
         FrameCaptured?.Invoke(LastFrame);
     }
 
@@ -337,7 +344,7 @@ public sealed class DeckPlayer : IDisposable
             var count = root.GetProperty("count").GetInt32();
             var contentH = root.GetProperty("contentH").GetInt32();
             var param = root.GetProperty("slideParam").GetString();
-            _contentHeight = Math.Clamp(contentH, 1, _height + NavbarAllowance);
+            _contentHeight = Math.Clamp(contentH, 1 + 2 * Margin, ViewportHeight);
             // The page being left can still report, and decks share slide ids (the first is often just "p").
             if (root.GetProperty("deck").GetString() != _deckId) return;
             Ready = true;

@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.Json;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>A slide in the PPTX export: whether it's hidden ("skipped" in Google Slides) and its notes.</summary>
 public sealed record PptxSlide(bool Hidden, NoteText Notes);

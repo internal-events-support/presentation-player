@@ -6,7 +6,7 @@ using System.Xml.Linq;
 using Windows.Data.Pdf;
 using Windows.Storage.Streams;
 
-namespace GoogleSlidesNdiPresenter;
+namespace PresentationPlayer;
 
 /// <summary>
 /// A deck as opened. Slides are all of its slides, including skipped (hidden) ones; their pictures
@@ -52,7 +52,7 @@ public static partial class PresentationLoader
     private static HttpClient CreateClient()
     {
         var client = new HttpClient(Cookies) { Timeout = TimeSpan.FromSeconds(120) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) GoogleSlidesNdiPresenter/1.0");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) PresentationPlayer/1.0");
         return client;
     }
 
@@ -62,10 +62,11 @@ public static partial class PresentationLoader
     [GeneratedRegex(@"^[a-zA-Z0-9_-]{20,}$")]
     private static partial Regex BareIdRegex();
 
-    /// <summary>Extracts the presentation ID from an edit/view URL or a bare ID.</summary>
+    /// <summary>The presentation's id, from an edit/view URL, a bare id or the path of a file.</summary>
     public static string? ExtractId(string urlOrId)
     {
         urlOrId = urlOrId.Trim();
+        if (LocalDecks.PathOf(urlOrId) is { } path) return LocalDecks.IdFor(path);
         if (urlOrId.Contains("/presentation/d/e/"))
             return null; // "Publish to web" URLs can't be exported; need the normal share link.
         var m = UrlIdRegex().Match(urlOrId);
@@ -75,6 +76,7 @@ public static partial class PresentationLoader
 
     public static async Task<LoadedPresentation> LoadAsync(string url, int width, int height, CancellationToken ct = default)
     {
+        if (LocalDecks.PathOf(url) is { } path) return await LocalDecks.LoadAsync(path, width, height, ct);
         try
         {
             return await OpenAsync(url, width, height, ct);
@@ -91,8 +93,8 @@ public static partial class PresentationLoader
     private static async Task<LoadedPresentation> OpenAsync(string url, int width, int height, CancellationToken ct)
     {
         var id = ExtractId(url) ?? throw new ArgumentException(
-            "That doesn't look like a Google Slides link. Use the normal share link " +
-            "(https://docs.google.com/presentation/d/<id>/edit).");
+            "That doesn't look like a Google Slides link (https://docs.google.com/presentation/d/<id>/edit) " +
+            "or the path of a PowerPoint or PDF file.");
 
         await Cookies.SyncAsync(Google);
         // The player's page has the slides and notes, the editor's page the title, revision and media.
@@ -169,6 +171,11 @@ public static partial class PresentationLoader
     public static async Task LoadPicturesAsync(LoadedPresentation deck, int width, int height, Func<int> current, Action changed, CancellationToken ct)
     {
         if (deck.Slides.All(s => s.Picture.Quality == PictureQuality.Full)) return;
+        if (LocalDecks.IsLocal(deck.Id))
+        {
+            await LocalDecks.LoadPicturesAsync(deck, current, changed, ct);
+            return;
+        }
         var taken = new HashSet<int>();
         var pdfFailed = false;
         long quietUntil = 0;
@@ -262,7 +269,7 @@ public static partial class PresentationLoader
         var tasks = new List<Task<LoadedPresentation>>();
         foreach (var (part, i) in master.Parts.Select((p, i) => (p, i)))
         {
-            var id = ExtractId(part.Url) ?? throw new InvalidOperationException($"Link {i + 1} of this master deck isn't a Google Slides link.");
+            var id = ExtractId(part.Url) ?? throw new InvalidOperationException($"Presentation {i + 1} of this master deck isn't a Google Slides link or a file.");
             if (!byId.TryGetValue(id, out var task))
                 byId[id] = task = LoadGatedAsync(part, i);
             tasks.Add(task);
@@ -287,6 +294,7 @@ public static partial class PresentationLoader
     /// <summary>A deck's title, how many slides it has and which are skipped, without downloading it.</summary>
     public static async Task<DeckSummary> SummariseAsync(string url, CancellationToken ct = default)
     {
+        if (LocalDecks.PathOf(url) is { } path) return await LocalDecks.SummariseAsync(path, ct);
         var id = ExtractId(url) ?? throw new ArgumentException("That doesn't look like a Google Slides link.");
         await Cookies.SyncAsync(Google);
         var pageTask = FetchPageInfoAsync(id, ct);
@@ -298,18 +306,18 @@ public static partial class PresentationLoader
             Enumerable.Range(1, pages.Count).Where(n => pages[n - 1].Hidden).ToList());
     }
 
-    private static async Task<IReadOnlyList<SlideMedia>> CheckMediaAsync(IReadOnlyList<SlideMedia> media, CancellationToken ct)
+    internal static async Task<IReadOnlyList<SlideMedia>> CheckMediaAsync(IReadOnlyList<SlideMedia> media, CancellationToken ct)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(15));
         var checks = media
-            .Where(m => m.FileId != null)
+            .Where(m => m.FileId != null && m.Access == null)
             .Select(m => (m.Source, Id: m.FileId!))
             .Distinct()
             .ToDictionary(k => k, k => CheckAccessAsync(k.Source, k.Id, timeout.Token));
         try { await Task.WhenAll(checks.Values); } catch { /* individual failures are reported as null */ }
         return media
-            .Select(m => m.FileId != null && checks.TryGetValue((m.Source, m.FileId), out var t) && t.IsCompletedSuccessfully
+            .Select(m => m.FileId != null && m.Access == null && checks.TryGetValue((m.Source, m.FileId), out var t) && t.IsCompletedSuccessfully
                 ? m with { Access = t.Result }
                 : m)
             .ToList();
@@ -461,22 +469,28 @@ public static partial class PresentationLoader
         for (uint i = 0; i < doc.PageCount; i++)
         {
             ct.ThrowIfCancellationRequested();
-            using var page = doc.GetPage(i);
-            var size = page.Size;
-            var scale = Math.Min(width / size.Width, height / size.Height);
-            var options = new PdfPageRenderOptions
-            {
-                DestinationWidth = (uint)Math.Max(1, Math.Round(size.Width * scale)),
-                DestinationHeight = (uint)Math.Max(1, Math.Round(size.Height * scale)),
-            };
-
-            using var output = new InMemoryRandomAccessStream();
-            await page.RenderToStreamAsync(output, options); // PNG by default
-            output.Seek(0);
-            using var ms = new MemoryStream();
-            await output.AsStreamForRead().CopyToAsync(ms);
-            rendered((int)i, ms.ToArray());
+            rendered((int)i, await RenderPageAsync(doc, i, width, height));
         }
+    }
+
+    /// <summary>A page of a PDF as PNG, as large as fits.</summary>
+    internal static async Task<byte[]> RenderPageAsync(PdfDocument doc, uint index, int width, int height)
+    {
+        using var page = doc.GetPage(index);
+        var size = page.Size;
+        var scale = Math.Min(width / size.Width, height / size.Height);
+        var options = new PdfPageRenderOptions
+        {
+            DestinationWidth = (uint)Math.Max(1, Math.Round(size.Width * scale)),
+            DestinationHeight = (uint)Math.Max(1, Math.Round(size.Height * scale)),
+        };
+
+        using var output = new InMemoryRandomAccessStream();
+        await page.RenderToStreamAsync(output, options); // PNG by default
+        output.Seek(0);
+        using var ms = new MemoryStream();
+        await output.AsStreamForRead().CopyToAsync(ms);
+        return ms.ToArray();
     }
 
     [GeneratedRegex(@"<title>(.*?)</title>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
@@ -490,7 +504,7 @@ public static partial class PresentationLoader
     /// couldn't be read. Used to spot decks that changed since they were loaded.
     /// </summary>
     public static async Task<long?> FetchRevisionAsync(string id, CancellationToken ct = default) =>
-        (await FetchPageInfoAsync(id, ct)).Revision;
+        LocalDecks.IsLocal(id) ? LocalDecks.Revision(id) : (await FetchPageInfoAsync(id, ct)).Revision;
 
     private sealed record PageInfo(string? Title, long? Revision, IReadOnlyList<SlideMedia> Media, IReadOnlyList<string> PageIds);
 
@@ -631,7 +645,7 @@ public static partial class PresentationLoader
             (string?)run.Element(A + "rPr")?.Attribute(attribute) is "1" or "true";
     }
 
-    private static XDocument? LoadXml(ZipArchive zip, string path)
+    internal static XDocument? LoadXml(ZipArchive zip, string path)
     {
         var entry = zip.GetEntry(path);
         if (entry == null) return null;
@@ -658,7 +672,7 @@ public static partial class PresentationLoader
         return rels;
     }
 
-    private static string ResolvePath(string baseDir, string target)
+    internal static string ResolvePath(string baseDir, string target)
     {
         if (target.StartsWith('/')) return target.TrimStart('/');
         var parts = new List<string>(baseDir.Split('/', StringSplitOptions.RemoveEmptyEntries));

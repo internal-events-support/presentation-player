@@ -1,4 +1,4 @@
-// Google Slides NDI Presenter — app UI (desktop window and web remote).
+// Presentation Player — app UI (desktop window and web remote).
 (() => {
   'use strict';
 
@@ -82,9 +82,21 @@
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const thumbUrl = (n, w) => `/api/slides/${n}.jpg?w=${w}&id=${state ? state.presentationId : ''}&v=${state ? state.version : 0}`;
 
+  // The path of a file on the computer running the app. "Copy as path" puts quotes around it.
+  function parsePath(text) {
+    const path = text.replace(/^"(.*)"$/, '$1').trim();
+    if (!/^([a-z]:[\\/]|\\\\|file:)/i.test(path)) return null;
+    if (!/\.(pptx|ppsx|pptm|ppsm|pdf)$/i.test(path)) return { error: 'Only PowerPoint (.pptx) and PDF files can be opened.' };
+    const known = state && [...(state.recent || []), { id: state.presentationId, url: state.url || '' }].find(r => r.url.toLowerCase() === path.toLowerCase());
+    return { id: (known && known.id) || `file:${path.toLowerCase()}`, url: path, file: true };
+  }
+  const isFile = url => !!url && !!parsePath(url);
+
   function parseSlidesUrl(raw) {
     const s = (raw || '').trim();
     if (!s) return { empty: true };
+    const file = parsePath(s);
+    if (file) return file;
     if (/\/presentation\/d\/e\//.test(s))
       return { error: '“Publish to web” links can’t be used — copy the link from the Share button instead.' };
     const m = s.match(/\/presentation\/d\/([a-zA-Z0-9_-]{20,})/);
@@ -92,7 +104,7 @@
     if (/^[a-zA-Z0-9_-]{25,}$/.test(s)) return { id: s, url: s };
     if (/docs\.google\.com\/(document|spreadsheets|forms)/.test(s))
       return { error: 'That’s a Google Docs/Sheets link — paste a Google Slides link.' };
-    return { error: 'That doesn’t look like a Google Slides link.' };
+    return { error: 'That doesn’t look like a Google Slides link, or the path of a PowerPoint or PDF file.' };
   }
 
   // ------------------------------------------------------------------ Toasts
@@ -124,7 +136,7 @@
 
     // Loads started elsewhere (Companion, a phone, the HTTP API, or reopening the last deck at
     // startup) get the same overlay as ones started from this window.
-    if (s.loading && !switching) setSwitching({ id: s.loadingId, title: s.loadingTitle, refresh: s.loadingRefresh, remote: true });
+    if (s.loading && !switching) setSwitching({ id: s.loadingId, title: s.loadingTitle, refresh: s.loadingRefresh, remote: true, file: /^file-/.test(s.loadingId || '') });
     else if (!s.loading && switching && switching.remote) setSwitching(null);
 
     const hasDeck = !!s.presentationId || s.slideCount > 0;
@@ -141,12 +153,13 @@
     const title = s.title || (s.loading ? 'Loading…' : 'Untitled presentation');
     $('#deckTitle').textContent = title;
     renderMediaBadge();
-    document.title = hasDeck ? `${title} · Slides Presenter` : 'Google Slides NDI Presenter';
+    document.title = hasDeck ? `${title} · Presentation Player` : 'Presentation Player';
     const updated = (s.status.match(/at (\d\d:\d\d)/) || [])[1];
     const skipped = (s.skipped || []).length;
     $('#deckMeta').textContent = s.slideCount
       ? `${s.isMaster ? `${plural(s.parts.length, 'presentation')} · ` : ''}${plural(s.slideCount, 'slide')}${skipped ? ` · ${skipped} skipped` : ''}${updated ? ` · Updated ${updated}` : ''}`
       : s.loading ? 'Downloading slides and notes…' : '';
+    $('#openInSlides').hidden = !s.deckId || s.deckId.startsWith('file-');
     if (s.deckId) $('#openInSlides').href = `https://docs.google.com/presentation/d/${s.deckId}/edit${s.isMaster && s.pageId ? `#slide=id.${s.pageId}` : ''}`;
     const warn = $('#liveWarn');
     warn.hidden = !s.liveError;
@@ -178,6 +191,8 @@
     $('#nextBtn').disabled = !s.slideCount || (!s.live && s.slide >= shownSlide(s.slideCount, -1));
     renderVideo(s.video);
 
+    renderOutputs(s);
+
     // Notes toolbar
     const size = Math.round(s.notesAutoFit ? s.notesEffectiveFontSize : s.notesFontSize);
     $('#sizeVal').textContent = size;
@@ -188,6 +203,51 @@
     $('#scrollDownBtn').disabled = s.notesScroll >= s.notesMaxScroll - 0.5;
   }
 
+  // ------------------------------------------------------------------ Outputs on this computer's displays
+
+  const outputKeys = {};
+  function renderOutputs(s) {
+    if (!isDesktop) return;
+    for (const select of document.querySelectorAll('[data-output]')) {
+      const out = select.dataset.output;
+      const at = out === 'slides' ? s.slidesOutput : s.notesOutput;
+      const other = out === 'slides' ? s.notesOutput : s.slidesOutput;
+      if (!at) continue;
+      const key = JSON.stringify([at, other, s.displays]);
+      if (key === outputKeys[out]) continue;
+      outputKeys[out] = key;
+      const options = [['off', 'No display'], ['window', 'Window']];
+      for (const d of s.displays) {
+        const about = [`${d.width} × ${d.height}`];
+        if (d.app) about.push('this display');
+        if (other.mode === 'display' && other.display === d.id) about.push(out === 'slides' ? 'showing the presenter view' : 'showing the slides');
+        options.push([`display:${d.id}`, `Full screen on ${d.name}`, ` (${about.join(', ')})`]);
+      }
+      if (!at.connected) options.push([`display:${at.display}`, `${at.displayName || 'Display'} isn’t connected`]);
+      const value = at.mode === 'display' ? `display:${at.display}` : at.mode;
+      // The size and so on are for choosing; once chosen, the name is enough.
+      select.replaceChildren(...options.map(([v, label, about]) => new Option(v === value ? label : label + (about || ''), v, false, v === value)));
+      const box = select.closest('.out-pick');
+      box.hidden = false;
+      box.classList.toggle('is-on', at.mode !== 'off');
+      box.classList.toggle('is-missing', !at.connected);
+      select.title = at.mode === 'off' ? 'Show this on a display or in a window' : select.selectedOptions[0].text;
+    }
+  }
+  for (const select of document.querySelectorAll('[data-output]')) {
+    select.addEventListener('change', async () => {
+      const [mode, ...id] = select.value.split(':');
+      select.blur(); // so the keyboard shortcuts work again
+      try {
+        await api(`/api/outputs/${select.dataset.output}`, { method: 'PUT', privileged: true, body: { mode, display: id.join(':') } });
+      } catch (err) {
+        delete outputKeys[select.dataset.output];
+        if (state) renderOutputs(state);
+        toast(err.message, 'error');
+      }
+    });
+  }
+
   // Shown once each time the open deck goes out of date, so it doesn't nag after every edit.
   let outOfDateToasted = '';
 
@@ -195,7 +255,7 @@
     const stale = s.outOfDate && !s.loading;
     const key = stale ? `${s.presentationId}@${s.loadedRevision}` : '';
     if (key && key !== outOfDateToasted) {
-      toast('This presentation has been updated in Google Slides.', 'info', { label: 'Refresh', run: refresh });
+      toast('This presentation has been updated.', 'info', { label: 'Refresh', run: refresh });
     }
     if (!s.loading) outOfDateToasted = key;
   }
@@ -235,6 +295,8 @@
           ? `<button type="button" class="badge badge-bad badge-action" data-request-file="${esc(m.fileId)}" title="${why} Click to ask the owner for access.">No access<svg class="ic"><use href="#i-external"/></svg></button>`
           : `<span class="badge badge-bad" title="${why} Ask the owner to share it.">No access</span>`;
       }
+      case 'unsupported': return '<span class="badge badge-bad" title="The clip is in a format that can’t be played here. Convert it to MP4 (H.264) or MP3.">Can’t play</span>';
+      case 'missing': return '<span class="badge badge-bad" title="The clip isn’t in the file or next to it.">Missing</span>';
       case 'private': return '<span class="badge badge-bad" title="This YouTube video is private or has been removed.">Unavailable</span>';
       case 'not embeddable': return '<span class="badge badge-bad" title="The owner of this YouTube video doesn’t allow it to be played in other sites.">Can’t embed</span>';
       default: return '<span class="badge badge-plain" title="Couldn’t check this one.">Unknown</span>';
@@ -317,7 +379,7 @@
     const stale = state.outOfDate && !state.loading;
     el.innerHTML = `
       <button class="btn${stale ? ' has-update' : ''}" type="button" data-act="refresh"
-        title="${stale ? 'Updated in Google Slides. Refresh to load the changes (R)' : 'Reload from Google Slides (R)'}"><svg class="ic"><use href="#i-refresh"/></svg>Refresh<span class="update-dot" aria-hidden="true"></span></button>
+        title="${stale ? 'It has been updated. Refresh to load the changes (R)' : 'Load it again, with any changes (R)'}"><svg class="ic"><use href="#i-refresh"/></svg>Refresh<span class="update-dot" aria-hidden="true"></span></button>
       <button class="btn" type="button" data-act="close" title="Close; the outputs show the holding screen (Ctrl+W)">Close</button>`;
     $('[data-act="refresh"]', el).onclick = () => { closeMenu(); refresh(); };
     $('[data-act="close"]', el).onclick = () => { closeMenu(); closePresentation(); };
@@ -501,22 +563,30 @@
   function addLinks() {
     const text = $('#masterLinks').value.trim();
     if (!text) return true;
-    const links = text.split(/[\s,]+/).filter(Boolean).map(parseSlidesUrl);
+    // Paths can have spaces and commas in them, so they're one to a line.
+    const links = text.split(/[\r\n]+/).flatMap(line => parsePath(line.trim()) ? [line.trim()] : line.split(/[\s,]+/)).filter(Boolean).map(parseSlidesUrl);
     const good = links.filter(l => l.id);
     if (!good.length) {
-      $('#masterError').textContent = (links[0] && links[0].error) || 'Paste a Google Slides link first.';
+      $('#masterError').textContent = (links[0] && links[0].error) || 'Paste a Google Slides link or the path of a file first.';
       return false;
     }
     $('#masterError').textContent = '';
     $('#masterLinks').value = '';
-    for (const l of good) {
-      const part = { url: l.url, title: '', skipStart: 0, skipEnd: 0 };
+    addParts(good);
+    return true;
+  }
+  function addParts(links) {
+    for (const l of links) {
+      const part = { url: l.url, title: fileTitle(l) || '', skipStart: 0, skipEnd: 0 };
       editing.parts.push(part);
       lookUp(part);
     }
     renderParts();
-    return true;
   }
+  $('#masterBrowse').addEventListener('click', async () => {
+    const files = await browse(true);
+    if (editing && files.length) addParts(files.map(parseSlidesUrl).filter(l => l.id));
+  });
   $('#masterAdd').addEventListener('click', addLinks);
   $('#masterLinks').addEventListener('paste', () => setTimeout(addLinks, 0));
   $('#masterLinks').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addLinks(); } });
@@ -551,7 +621,7 @@
     try {
       await api(`/api/masters/${encodeURIComponent(editing.id)}`, { method: 'DELETE', privileged: true });
       closeDialog('#masterDialog');
-      toast(`Deleted “${editing.name}”. Its presentations are still in Google Slides.`, 'info');
+      toast(`Deleted “${editing.name}”. Its presentations are still where they were.`, 'info');
     } catch (err) { $('#masterError').textContent = err.message; }
   });
   for (const id of ['#newMasterBtn', '#emptyNewMaster']) {
@@ -620,7 +690,7 @@
       const img = $('img', b);
       img.onload = () => { img.classList.add('is-loaded'); img.parentElement.classList.remove('is-waiting'); };
       if (!skip) b.onclick = () => act(`/api/goto/${n}`);
-      else { b.title = 'Skipped in Google Slides, so it isn’t shown'; b.setAttribute('aria-disabled', 'true'); }
+      else { b.title = 'Skipped in the presentation, so it isn’t shown'; b.setAttribute('aria-disabled', 'true'); }
       return b;
     });
     strip.classList.toggle('has-parts', starts.size > 0);
@@ -696,8 +766,8 @@
       const verb = value.refresh ? 'Refreshing' : 'Opening';
       $('#switchTitle').textContent = value.title ? `${verb} “${value.title}”` : `${verb} presentation…`;
       $('#switchSub').textContent = value.refresh
-        ? 'Downloading the latest slides and speaker notes'
-        : 'Downloading slides and speaker notes';
+        ? value.file ? 'Reading the file again' : 'Downloading the latest slides and speaker notes'
+        : value.file ? 'Reading the file' : 'Downloading slides and speaker notes';
     }
     if (state) renderRecents();
   }
@@ -751,18 +821,36 @@
       toast(err.message, 'error');
   }
 
+  const fileTitle = p => p.file ? p.url.split(/[\\/]/).pop().replace(/\.\w+$/, '') : undefined;
+
+  async function browse(many) {
+    try {
+      return (await api(`/api/browse?many=${!!many}`, { privileged: true })).files;
+    } catch (err) {
+      toast(err.message, 'error');
+      return [];
+    }
+  }
+  for (const id of ['#emptyBrowse', '#openBrowse']) {
+    $(id).hidden = !isDesktop;
+    $(id).addEventListener('click', async () => {
+      const [file] = await browse(false);
+      if (!file) return;
+      closeDialog('#openDialog');
+      openPresentation(file);
+    });
+  }
+
   async function openPresentation(url, title) {
     const parsed = /^master:/.test(url) ? { id: url, url } : parseSlidesUrl(url);
     if (parsed.error || parsed.empty) { toast(parsed.error || 'Paste a Google Slides link first.', 'error'); return false; }
+    const known = state && (state.recent || []).find(r => r.id === parsed.id);
     if (switching) return false;
     // Reloading the deck that's already open is a refresh, not a switch.
     const isSwitch = !state || parsed.id !== state.presentationId;
-    if (isSwitch) {
-      const known = state && (state.recent || []).find(r => r.id === parsed.id);
-      setSwitching({ id: parsed.id, title: title || (known && known.title) });
-    }
+    if (isSwitch) setSwitching({ id: parsed.id, title: title || (known && known.title) || fileTitle(parsed), file: parsed.file });
     try {
-      const s = await api('/api/load', { body: { url: parsed.url } });
+      const s = await api('/api/load', { body: { url: parsed.url }, privileged: true });
       toast(`Opened “${s.title || 'presentation'}” · ${plural(s.slideCount, 'slide')}`, 'ok');
       requestAnimationFrame(startStreams);
       return true;
@@ -787,7 +875,7 @@
     return update;
   }
 
-  const DEFAULT_HINT = 'The presentation must be shared as <b>Anyone with the link can view</b>.';
+  const DEFAULT_HINT = 'Google Slides presentations must be shared as <b>Anyone with the link can view</b>, or with the account signed in here.';
   const validateEmpty = wireUrlField($('#emptyUrl'), $('#emptyField'), $('#emptyHint'), DEFAULT_HINT);
   const validateOpen = wireUrlField($('#openUrl'), $('#openField'), $('#openHint'), DEFAULT_HINT);
 
@@ -836,7 +924,7 @@
 
   async function refresh() {
     if (!state || !state.url || state.loading || switching) return;
-    setSwitching({ id: state.presentationId, title: state.title, refresh: true });
+    setSwitching({ id: state.presentationId, title: state.title, refresh: true, file: isFile(state.url) });
     try {
       await api('/api/refresh');
       toast('Presentation refreshed', 'ok');
@@ -1155,7 +1243,7 @@
       gotoBuffer = ''; showGoto();
       if (n >= 1 && n <= state.slideCount) {
         act(`/api/goto/${n}`);
-        if ((state.skipped || []).includes(n)) toast(`Slide ${n} is skipped in Google Slides, so it isn’t shown.`, 'info');
+        if ((state.skipped || []).includes(n)) toast(`Slide ${n} is skipped in the presentation, so it isn’t shown.`, 'info');
       }
       else toast(`There's no slide ${n}.`, 'error');
       handled(); return;
@@ -1191,7 +1279,19 @@
       const b = e.target.closest('[data-win]');
       if (b) host.postMessage(`window:${b.dataset.win}`);
     });
+    // Presentation files can be dropped anywhere on the window.
+    for (const type of ['dragover', 'drop']) document.addEventListener(type, e => {
+      if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+      e.preventDefault();
+      if (type === 'drop' && e.dataTransfer.files.length) host.postMessageWithAdditionalObjects('drop', e.dataTransfer.files);
+      else e.dataTransfer.dropEffect = 'copy';
+    });
     host.addEventListener('message', e => {
+      if (typeof e.data === 'string' && e.data.startsWith('files:')) {
+        const files = JSON.parse(e.data.slice(6));
+        if ($('#masterDialog').open) addParts(files.map(parseSlidesUrl).filter(l => l.id));
+        else if (files.length && !$('#settingsDialog').open) { closeDialog('#openDialog'); openPresentation(files[0]); }
+      }
       if (e.data === 'window:normal' || e.data === 'window:maximized') {
         const max = e.data === 'window:maximized';
         document.body.classList.toggle('is-maximized', max);

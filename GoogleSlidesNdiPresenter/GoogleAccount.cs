@@ -15,7 +15,7 @@ namespace GoogleSlidesNdiPresenter;
 /// the session lives in the WebView2 profile, whose cookies Chromium encrypts with Windows DPAPI.
 /// All public members are thread-safe.
 /// </summary>
-public sealed partial class GoogleAccount : PresentationLoader.IGoogleSession
+public sealed partial class GoogleAccount(AppSettings settings) : PresentationLoader.IGoogleSession
 {
     private const string ServiceUrl = "https://docs.google.com/presentation/";
     private const string SignInUrl =
@@ -28,6 +28,9 @@ public sealed partial class GoogleAccount : PresentationLoader.IGoogleSession
     private SignInForm? _page; // the "request access" window
     private volatile string? _email;
     private volatile bool _signedIn;
+    private volatile bool _expired;
+    private Task? _check;
+    private System.Windows.Forms.Timer? _timer;
 
     /// <summary>
     /// The WebView2 profile holding the Google session. Each settings file gets its own, so a second
@@ -44,7 +47,10 @@ public sealed partial class GoogleAccount : PresentationLoader.IGoogleSession
 
     public bool SignedIn => _signedIn;
 
-    /// <summary>The signed-in account's address, when Google reports it.</summary>
+    /// <summary>Google has ended the session (they last a limited time), so the account has to sign in again.</summary>
+    public bool Expired => _expired;
+
+    /// <summary>The address of the account that's signed in, or was until Google signed it out.</summary>
     public string? Email => _email;
 
     /// <summary>Raised (on any thread) when the account signs in or out.</summary>
@@ -65,8 +71,19 @@ public sealed partial class GoogleAccount : PresentationLoader.IGoogleSession
         _env = env;
         _cookieHost = await env.CreateCoreWebView2ControllerAsync(ui.Handle, ControllerOptions(env));
         _cookieHost.IsVisible = false;
-        await RefreshStatusAsync();
+        // Normally well under a second; don't hold up opening the last deck if Google is slow.
+        await Task.WhenAny(RefreshStatusAsync(), Task.Delay(5000));
+        _timer = new System.Windows.Forms.Timer { Interval = 10 * 60 * 1000 };
+        _timer.Tick += (_, _) => _ = RefreshStatusAsync();
+        _timer.Start();
     }
+
+    /// <summary>Checks whether Google still accepts the session.</summary>
+    public Task CheckAsync() => OnUiAsync(async () =>
+    {
+        await RefreshStatusAsync();
+        return true;
+    });
 
     /// <summary>
     /// Opens the sign-in window (or brings it forward) and completes when it closes.
@@ -133,6 +150,8 @@ public sealed partial class GoogleAccount : PresentationLoader.IGoogleSession
 
     public Task SignOutAsync() => OnUiAsync(async () =>
     {
+        settings.GoogleEmail = "";
+        settings.Save();
         await ClearSessionAsync();
         await RefreshStatusAsync();
         return (string?)null;
@@ -165,15 +184,96 @@ public sealed partial class GoogleAccount : PresentationLoader.IGoogleSession
                domain.EndsWith(".googleusercontent.com", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task RefreshStatusAsync()
+    private Task RefreshStatusAsync()
+    {
+        // One check at a time; whoever asks meanwhile waits for the same one.
+        if (_check is { IsCompleted: false }) return _check;
+        return _check = RefreshStatusOnUiAsync();
+    }
+
+    private async Task RefreshStatusOnUiAsync()
     {
         var cookies = await GetCookiesOnUiAsync();
-        var wasSignedIn = _signedIn;
-        var oldEmail = _email;
-        // SID is Google's main session cookie; it's only there while an account is signed in.
-        _signedIn = cookies.Any(c => c.Name is "SID" or "__Secure-1PSID" or "__Secure-3PSID");
-        _email = _signedIn ? await Task.Run(() => FetchEmailAsync(cookies)) : null;
-        if (wasSignedIn != _signedIn || oldEmail != _email) Changed?.Invoke();
+        var before = (_signedIn, _expired, _email);
+        var hasSession = cookies.Any(c => SessionCookies.Contains(c.Name));
+        if (!hasSession)
+        {
+            _signedIn = false;
+            _expired = settings.GoogleEmail.Length > 0; // it was signed in, and nobody signed it out here
+            _email = _expired ? settings.GoogleEmail : null;
+        }
+        else if (await IsSessionAcceptedAsync() != false)
+        {
+            // The check may have renewed the cookies. (No answer, e.g. offline: assume it's still good.)
+            _signedIn = true;
+            _expired = false;
+            cookies = await GetCookiesOnUiAsync();
+            _email = await Task.Run(() => FetchEmailAsync(cookies)) ?? (settings.GoogleEmail.Length > 0 ? settings.GoogleEmail : null);
+            if (_email != null && settings.GoogleEmail != _email)
+            {
+                settings.GoogleEmail = _email;
+                settings.Save();
+            }
+        }
+        else
+        {
+            // The cookies are still here but Google no longer accepts them. Remembered as signed out by
+            // Google, and dropped: with a dead session Google refuses even public videos.
+            _email = settings.GoogleEmail.Length > 0 ? settings.GoogleEmail : await Task.Run(() => FetchEmailAsync(cookies));
+            settings.GoogleEmail = _email ?? "a Google account";
+            settings.Save();
+            await DropSessionCookiesAsync();
+            _signedIn = false;
+            _expired = true;
+        }
+        if (before != (_signedIn, _expired, _email)) Changed?.Invoke();
+    }
+
+    // Google's session cookies; they're only there while an account is signed in.
+    private static readonly HashSet<string> SessionCookies = ["SID", "__Secure-1PSID", "__Secure-3PSID"];
+    private static readonly HashSet<string> DeadCookies =
+    [
+        .. SessionCookies, "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID",
+        "SIDCC", "__Secure-1PSIDCC", "__Secure-3PSIDCC", "__Secure-1PSIDTS", "__Secure-3PSIDTS", "OSID", "__Secure-OSID",
+        "LSID", "__Host-1PLSID", "__Host-3PLSID",
+    ];
+
+    private async Task DropSessionCookiesAsync()
+    {
+        if (_cookieHost == null) return;
+        var manager = _cookieHost.CoreWebView2.CookieManager;
+        foreach (var c in await manager.GetCookiesAsync(""))
+            if (IsGoogleDomain(c.Domain) && DeadCookies.Contains(c.Name)) manager.DeleteCookie(c);
+    }
+
+    /// <summary>
+    /// Opens Slides' home page in the hidden browser: Google sends it to the sign-in page when the
+    /// session has ended. Null when there's no telling (offline, say).
+    /// </summary>
+    private async Task<bool?> IsSessionAcceptedAsync()
+    {
+        if (_cookieHost == null) return null;
+        var core = _cookieHost.CoreWebView2;
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Completed(object? sender, CoreWebView2NavigationCompletedEventArgs e) => done.TrySetResult(e.IsSuccess);
+        core.NavigationCompleted += Completed;
+        try
+        {
+            core.Navigate(ServiceUrl + "u/0/");
+            if (await Task.WhenAny(done.Task, Task.Delay(20000)) != done.Task || !await done.Task) return null;
+            return Uri.TryCreate(core.Source, UriKind.Absolute, out var uri)
+                ? uri.Host == "accounts.google.com" ? false : uri.Host == "docs.google.com" ? true : null
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        finally
+        {
+            core.NavigationCompleted -= Completed;
+            try { core.Navigate("about:blank"); } catch { /* closing */ }
+        }
     }
 
     [GeneratedRegex(@"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")]

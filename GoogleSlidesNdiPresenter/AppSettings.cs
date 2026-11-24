@@ -46,7 +46,12 @@ public sealed class AppSettings
     public int AudioAsioBufferMs { get; set; } = 60;
     /// <summary>Allow the REST API / web remote to be reached from other devices (otherwise localhost only).</summary>
     public bool RemoteAccess { get; set; } = true;
+    /// <summary>Width of the next slide in the presenter view: "full" (same as the current slide) or "half".</summary>
+    public string NextPreview { get; set; } = "full";
+    /// <summary>The Google account last signed in, to notice when Google has signed it out. Empty after signing out here.</summary>
+    public string GoogleEmail { get; set; } = "";
     public List<RecentPresentation> Recent { get; set; } = [];
+    public List<MasterDeck> MasterDecks { get; set; } = [];
     public WindowPlacement? Window { get; set; }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };

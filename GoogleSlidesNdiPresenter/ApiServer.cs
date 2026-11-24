@@ -202,8 +202,63 @@ public sealed partial class ApiServer : IAsyncDisposable
             return Results.Bytes(jpeg, "image/jpeg");
         });
 
+        // ---- Master decks ----
+        app.MapGet("/api/masters", () => Results.Json(controller.GetState().MasterDecks, Json));
+        app.MapPut("/api/masters", async (HttpContext ctx) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var deck = await ctx.Request.ReadFromJsonAsync<MasterDeck>(Json);
+            if (deck == null) return Results.BadRequest(new { error = "Missing master deck." });
+            deck.Name = deck.Name.Trim();
+            if (deck.Name.Length == 0) return Results.BadRequest(new { error = "Give the master deck a name." });
+            if (deck.Parts.Count == 0) return Results.BadRequest(new { error = "Add at least one presentation." });
+            foreach (var p in deck.Parts)
+            {
+                if (PresentationLoader.ExtractId(p.Url) == null)
+                    return Results.BadRequest(new { error = $"That isn't a Google Slides link: {p.Url}" });
+                p.SkipStart = Math.Clamp(p.SkipStart, 0, 9999);
+                p.SkipEnd = Math.Clamp(p.SkipEnd, 0, 9999);
+            }
+            return Results.Json(controller.SaveMaster(deck), Json);
+        });
+        app.MapDelete("/api/masters/{id}", (HttpContext ctx, string id) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            controller.DeleteMaster(id);
+            return State();
+        });
+        // A deck's title and slide count, for the master deck editor.
+        app.MapPost("/api/deck-summary", async (HttpContext ctx) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var dto = await ctx.Request.ReadFromJsonAsync<LoadRequest>(Json);
+            try
+            {
+                return Results.Json(await PresentationLoader.SummariseAsync(dto?.Url ?? "", ctx.RequestAborted), Json);
+            }
+            catch (PresentationLoader.NoAccessException ex)
+            {
+                return Results.Json(new { error = ex.Message, code = "no-access", presentationId = ex.DeckId }, Json, statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Results.Json(new { error = ex.Message }, Json, statusCode: StatusCodes.Status502BadGateway);
+            }
+        });
+
         // ---- App (desktop window only) ----
+        app.MapPut("/api/presenter", async (HttpContext ctx) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var dto = await ctx.Request.ReadFromJsonAsync<PresenterDto>(Json);
+            controller.SetNextPreview(dto?.NextPreview ?? "full");
+            return State();
+        });
+        // Some settings only take effect at startup: what this run started with, to tell when a restart is due.
+        var running = SettingsDto.From(settings);
+        bool RestartRequired() => !SettingsDto.From(settings).SameAtStartup(running);
         app.MapGet("/api/settings", () => Results.Json(SettingsDto.From(settings), Json));
+        app.MapGet("/api/settings/running", () => Results.Json(running, Json));
         app.MapPut("/api/settings", async (HttpContext ctx) =>
         {
             if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
@@ -212,10 +267,10 @@ public sealed partial class ApiServer : IAsyncDisposable
             if (dto.Validate() is { } error) return Results.BadRequest(new { error });
             dto.ApplyTo(settings);
             settings.Save();
-            return Results.Json(new { saved = true, restartRequired = true }, Json);
+            return Results.Json(new { saved = true, restartRequired = RestartRequired() }, Json);
         });
         // The Google account is desktop-only: remotes can't see who's signed in or change it.
-        object Account() => new { signedIn = google.SignedIn, email = google.Email };
+        object Account() => new { signedIn = google.SignedIn, expired = google.Expired, email = google.Email };
         app.MapGet("/api/google", (HttpContext ctx) =>
             Privileged(ctx) ? Results.Json(Account(), Json) : Results.StatusCode(StatusCodes.Status403Forbidden));
         app.MapPost("/api/google/signin", async (HttpContext ctx) =>
@@ -387,8 +442,9 @@ public sealed partial class ApiServer : IAsyncDisposable
         catch (PresentationLoader.NoAccessException ex)
         {
             // The UI offers to request access to the deck.
-            var id = url == null ? controller.GetState().PresentationId : PresentationLoader.ExtractId(url);
-            return Results.Json(new { error = ex.Message, code = "no-access", presentationId = id }, Json, statusCode: StatusCodes.Status502BadGateway);
+            var id = ex.DeckId ?? PresentationLoader.ExtractId(url ?? controller.GetState().Url);
+            var code = PresentationLoader.Google?.Expired == true ? "signed-out" : "no-access";
+            return Results.Json(new { error = ex.Message, code, presentationId = id }, Json, statusCode: StatusCodes.Status502BadGateway);
         }
         catch (Exception ex)
         {
@@ -428,6 +484,7 @@ public sealed partial class ApiServer : IAsyncDisposable
             .Distinct();
 
     private sealed record LoadRequest(string? Url);
+    private sealed record PresenterDto(string? NextPreview);
     private sealed record RequestAccessDto(string? Kind, string? Id);
 
     [GeneratedRegex(@"^[A-Za-z0-9_-]{10,100}$")]
@@ -453,6 +510,9 @@ public sealed partial class ApiServer : IAsyncDisposable
         public int AudioMonitorVolume { get; set; }
         public int AudioAsioBufferMs { get; set; }
 
+        // Read-only here too: PUT /api/presenter.
+        public string NextPreview { get; set; } = "";
+
         public static SettingsDto From(AppSettings s) => new()
         {
             SlidesNdiName = s.SlidesNdiName, NotesNdiName = s.NotesNdiName, NdiDiscoveryServer = s.NdiDiscoveryServer, ApiPort = s.ApiPort,
@@ -460,7 +520,13 @@ public sealed partial class ApiServer : IAsyncDisposable
             AudioOutputDevice = s.AudioOutputDevice, AudioOutputVolume = s.AudioOutputVolume,
             AudioMonitorDevice = s.AudioMonitorDevice, AudioMonitorVolume = s.AudioMonitorVolume,
             AudioAsioBufferMs = s.AudioAsioBufferMs,
+            NextPreview = s.NextPreview,
         };
+
+        /// <summary>Whether the settings that are only read at startup are the same.</summary>
+        public bool SameAtStartup(SettingsDto o) =>
+            (SlidesNdiName, NotesNdiName, NdiDiscoveryServer, ApiPort, RemoteAccess, Width, Height, FrameRate) ==
+            (o.SlidesNdiName, o.NotesNdiName, o.NdiDiscoveryServer, o.ApiPort, o.RemoteAccess, o.Width, o.Height, o.FrameRate);
 
         public string? Validate()
         {

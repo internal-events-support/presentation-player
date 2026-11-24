@@ -18,9 +18,10 @@ internal static class Program
             AppSettings.FilePath = Path.GetFullPath(args[i + 1]);
 
         var settings = AppSettings.Load();
-        var google = new GoogleAccount();
+        var google = new GoogleAccount(settings);
         PresentationLoader.Google = google;
         var controller = new PresentationController(settings);
+        google.Changed += () => controller.SetGoogleExpired(google.Expired);
         var audio = new AudioRouter();
         audio.Configure(settings);
         MainForm? form = null;

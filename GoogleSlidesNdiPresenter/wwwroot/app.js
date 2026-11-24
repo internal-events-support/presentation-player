@@ -66,15 +66,6 @@
   const QUALITY = { hd2160: '4K', hd1440: '1440p', hd1080: '1080p', hd720: '720p', large: '480p', medium: '360p', small: '240p', tiny: '144p' };
   const qualityLabel = q => QUALITY[q] || '';
 
-  function hashHue(s) {
-    let h = 0;
-    for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-    return h % 360;
-  }
-  function artStyle(title) {
-    const h = hashHue(title || '?');
-    return `background: linear-gradient(135deg, hsl(${h} 70% 58%), hsl(${(h + 45) % 360} 65% 38%))`;
-  }
   function initials(title) {
     const words = (title || '?').trim().split(/\s+/).filter(Boolean);
     return ((words[0] || '?')[0] + (words[1] ? words[1][0] : '')).toUpperCase();
@@ -113,7 +104,7 @@
     el.innerHTML = `<svg class="ic"><use href="#${icon}"/></svg><span>${esc(message)}</span>`;
     if (action) {
       const b = document.createElement('button');
-      b.className = 'btn btn-secondary';
+      b.className = 'btn';
       b.textContent = action.label;
       b.onclick = () => { action.run(); dismiss(); };
       el.append(b);
@@ -140,11 +131,10 @@
     app.dataset.view = hasDeck ? 'stage' : 'empty';
 
     // Load buttons
-    for (const id of ['#refreshBtn', '#closeBtn', '#emptySubmit', '#openSubmit']) {
+    for (const id of ['#emptySubmit', '#openSubmit']) {
       const b = $(id);
       b.disabled = s.loading;
     }
-    $('#refreshBtn').classList.toggle('is-busy', s.loading);
     renderOutOfDate(s);
 
     // Header
@@ -153,20 +143,21 @@
     renderMediaBadge();
     document.title = hasDeck ? `${title} · Slides Presenter` : 'Google Slides NDI Presenter';
     const updated = (s.status.match(/at (\d\d:\d\d)/) || [])[1];
+    const skipped = (s.skipped || []).length;
     $('#deckMeta').textContent = s.slideCount
-      ? `${plural(s.slideCount, 'slide')}${updated ? ` · Updated ${updated}` : ''}`
+      ? `${s.isMaster ? `${plural(s.parts.length, 'presentation')} · ` : ''}${plural(s.slideCount, 'slide')}${skipped ? ` · ${skipped} skipped` : ''}${updated ? ` · Updated ${updated}` : ''}`
       : s.loading ? 'Downloading slides and notes…' : '';
-    if (s.presentationId) $('#openInSlides').href = `https://docs.google.com/presentation/d/${s.presentationId}/edit`;
+    if (s.deckId) $('#openInSlides').href = `https://docs.google.com/presentation/d/${s.deckId}/edit${s.isMaster && s.pageId ? `#slide=id.${s.pageId}` : ''}`;
     const warn = $('#liveWarn');
     warn.hidden = !s.liveError;
     warn.title = s.liveError ? `${s.liveError} Animations and video won't play.` : '';
 
-    // Outputs
-    renderOutput($('#outSlides'), s.slidesNdiName, s.slidesReceivers, s.ndiError);
-    renderOutput($('#outNotes'), s.notesNdiName, s.notesReceivers, s.ndiError);
+    renderGoogleExpired(s);
+    $('#ndiWarn').hidden = !s.ndiError;
+    $('#ndiWarn').title = s.ndiError || '';
 
     // Recents
-    const recentKey = JSON.stringify([s.recent, s.presentationId]);
+    const recentKey = JSON.stringify([s.recent, s.masterDecks, s.presentationId, s.version, s.thumbnailCount > 0, s.outOfDate, s.loading, (s.missingPictures || []).includes(1)]);
     if (recentKey !== lastRecentKey) { lastRecentKey = recentKey; renderRecents(); }
 
     // Filmstrip & progress
@@ -174,6 +165,7 @@
       lastVersion = s.version; lastThumbCount = s.thumbnailCount;
       buildFilmstrip();
     }
+    fillPictures();
     if (s.slide !== lastSlide || !prev || prev.version !== s.version) {
       lastSlide = s.slide;
       updateCurrentSlide();
@@ -182,8 +174,8 @@
     // Slide toolbar (in live mode Next/Previous also step through animation builds, so they stay enabled)
     $('#posNow').textContent = s.slideCount ? s.slide : '–';
     $('#posTotal').textContent = s.slideCount || '–';
-    $('#prevBtn').disabled = !s.slideCount || (!s.live && s.slide <= 1);
-    $('#nextBtn').disabled = !s.slideCount || (!s.live && s.slide >= s.slideCount);
+    $('#prevBtn').disabled = !s.slideCount || (!s.live && s.slide <= shownSlide(1, 1));
+    $('#nextBtn').disabled = !s.slideCount || (!s.live && s.slide >= shownSlide(s.slideCount, -1));
     renderVideo(s.video);
 
     // Notes toolbar
@@ -200,38 +192,13 @@
   let outOfDateToasted = '';
 
   function renderOutOfDate(s) {
-    const btn = $('#refreshBtn');
     const stale = s.outOfDate && !s.loading;
-    btn.classList.toggle('has-update', stale);
-    btn.title = stale ? 'Updated in Google Slides — refresh to load the changes (R)' : 'Reload the presentation (R)';
     const key = stale ? `${s.presentationId}@${s.loadedRevision}` : '';
     if (key && key !== outOfDateToasted) {
       toast('This presentation has been updated in Google Slides.', 'info', { label: 'Refresh', run: refresh });
     }
     if (!s.loading) outOfDateToasted = key;
   }
-
-  function renderOutput(el, name, receivers, error) {
-    $('[data-name]', el).textContent = name || 'Unavailable';
-    const status = $('[data-status]', el);
-    if (error || !name) {
-      el.dataset.state = 'error';
-      status.textContent = 'NDI not available';
-      el.title = error || '';
-    } else {
-      const via = state && state.ndiDiscovery ? `Registered with discovery server ${state.ndiDiscovery}.` : '';
-      if (receivers > 0) {
-        el.dataset.state = 'live';
-        status.textContent = `${plural(receivers, 'receiver')} connected`;
-        el.title = via;
-      } else {
-        el.dataset.state = 'idle';
-        status.textContent = 'Waiting for a receiver';
-        el.title = `The source is on the network; nothing is watching it yet. ${via}`.trim();
-      }
-    }
-  }
-
 
   const clock = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
@@ -261,16 +228,16 @@
   // Whether each clip will actually play here (checked when the deck loads).
   function accessPill(m) {
     switch (m.access) {
-      case 'ok': return '<span class="pill">Can play</span>';
+      case 'ok': return '<span class="badge badge-plain">Can play</span>';
       case 'no access': {
         const why = `The ${m.kind} file in Google Drive isn’t shared with the Google account signed in here (or publicly), so it won’t play.`;
         return isDesktop && m.fileId
-          ? `<button type="button" class="pill pill-bad pill-action" data-request-file="${esc(m.fileId)}" title="${why} Click to ask the owner for access.">No access<svg class="ic"><use href="#i-external"/></svg></button>`
-          : `<span class="pill pill-bad" title="${why} Ask the owner to share it.">No access</span>`;
+          ? `<button type="button" class="badge badge-bad badge-action" data-request-file="${esc(m.fileId)}" title="${why} Click to ask the owner for access.">No access<svg class="ic"><use href="#i-external"/></svg></button>`
+          : `<span class="badge badge-bad" title="${why} Ask the owner to share it.">No access</span>`;
       }
-      case 'private': return '<span class="pill pill-bad" title="This YouTube video is private or has been removed.">Unavailable</span>';
-      case 'not embeddable': return '<span class="pill pill-bad" title="The owner of this YouTube video doesn’t allow it to be played in other sites.">Can’t embed</span>';
-      default: return '<span class="pill" title="Couldn’t check this one.">Unknown</span>';
+      case 'private': return '<span class="badge badge-bad" title="This YouTube video is private or has been removed.">Unavailable</span>';
+      case 'not embeddable': return '<span class="badge badge-bad" title="The owner of this YouTube video doesn’t allow it to be played in other sites.">Can’t embed</span>';
+      default: return '<span class="badge badge-plain" title="Couldn’t check this one.">Unknown</span>';
     }
   }
   const mediaProblems = () => (state?.media || []).filter(m => m.access && m.access !== 'ok').length;
@@ -289,15 +256,15 @@
     if (!media.length) {
       list.innerHTML = '<p class="media-empty">There’s no audio or video in this presentation.</p>';
     } else {
-      list.innerHTML = `<table class="media-table">
+      list.innerHTML = `<table class="table">
         <thead><tr><th>Slide</th><th>Media</th><th>Starts</th><th>Sound</th><th>Access</th></tr></thead>
         <tbody>${media.map(m => `
           <tr class="${m.slide === state.slide ? 'is-current' : ''}">
-            <td class="media-slide">${m.slide}</td>
+            <td class="media-slide">${m.slide}${(state.skipped || []).includes(m.slide) ? ' <span class="badge">Skipped</span>' : ''}</td>
             <td><div class="media-what"><svg class="ic"><use href="#i-${m.kind === 'audio' ? 'audio' : 'video'}"/></svg>
               <span>${m.kind === 'audio' ? 'Audio' : m.source === 'youtube' ? 'YouTube video' : 'Video'}<small title="${esc(m.name || '')}">${esc(m.name || '')}</small></span></div></td>
-            <td><span class="pill ${m.start === 'automatic' ? 'pill-auto' : ''}">${START_LABELS[m.start] || esc(m.start)}</span></td>
-            <td>${m.muted ? '<span class="pill pill-muted">Muted</span>' : '<span class="pill">On</span>'}</td>
+            <td><span class="badge ${m.start === 'automatic' ? 'badge-auto' : ''}">${START_LABELS[m.start] || esc(m.start)}</span></td>
+            <td>${m.muted ? '<span class="badge badge-muted">Muted</span>' : '<span class="badge badge-plain">On</span>'}</td>
             <td>${accessPill(m)}</td>
           </tr>`).join('')}</tbody></table>`;
     }
@@ -309,6 +276,8 @@
     if (b) requestAccess('file', b.dataset.requestFile);
   });
 
+  const firstPicture = () => state.thumbnailCount > 0 && !(state.missingPictures || []).includes(1);
+
   function recentItem(r, { removable }) {
     const li = document.createElement('li');
     const current = state && r.id === state.presentationId && !switching;
@@ -317,56 +286,286 @@
     li.tabIndex = 0;
     li.title = r.url;
     li.innerHTML = `
-      <div class="recent-art" style="${artStyle(r.title)}">${esc(initials(r.title))}</div>
+      <div class="recent-art">${current && firstPicture() ? `<img alt="" src="${thumbUrl(1, 160)}">` : esc(initials(r.title))}</div>
       <div class="recent-text"><strong>${esc(r.title)}</strong><span>${opening ? (switching.refresh ? 'Refreshing…' : 'Opening…') : `${plural(r.slideCount, 'slide')} · ${timeAgo(r.lastOpened)}`}</span></div>
       ${opening ? '<span class="spinner spinner-sm" aria-label="Loading"></span>'
-        : removable && !current ? '<button class="recent-remove" type="button" aria-label="Remove from recent" title="Remove from recent"><svg class="ic"><use href="#i-x"/></svg></button>' : ''}`;
+        : removable ? `<button class="recent-remove" type="button" aria-label="Remove from recent" ${current ? 'disabled title="Close it before removing it from this list"' : 'title="Remove from recent"'}><svg class="ic"><use href="#i-x"/></svg></button>` : ''}`;
+    if (current) li.append(openDeckActions());
     const open = () => {
       if (switching) return;
       if (!current) openPresentation(r.url, r.title);
       closeDialog('#openDialog'); closeMenu();
     };
     li.addEventListener('click', e => {
+      if (e.target.closest('.recent-actions')) return;
       if (e.target.closest('.recent-remove')) {
         e.stopPropagation();
+        if (current) return;
         fetch(`/api/recent/${encodeURIComponent(r.id)}`, { method: 'DELETE' }).then(res => res.json()).then(render).catch(() => {});
         return;
       }
       open();
     });
-    li.addEventListener('keydown', e => { if (e.key === 'Enter') open(); });
+    li.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === li) open(); });
     return li;
+  }
+
+  // Refresh and Close, under the open presentation in the list.
+  function openDeckActions() {
+    const el = document.createElement('div');
+    el.className = 'recent-actions';
+    const stale = state.outOfDate && !state.loading;
+    el.innerHTML = `
+      <button class="btn${stale ? ' has-update' : ''}" type="button" data-act="refresh"
+        title="${stale ? 'Updated in Google Slides. Refresh to load the changes (R)' : 'Reload from Google Slides (R)'}"><svg class="ic"><use href="#i-refresh"/></svg>Refresh<span class="update-dot" aria-hidden="true"></span></button>
+      <button class="btn" type="button" data-act="close" title="Close; the outputs show the holding screen (Ctrl+W)">Close</button>`;
+    $('[data-act="refresh"]', el).onclick = () => { closeMenu(); refresh(); };
+    $('[data-act="close"]', el).onclick = () => { closeMenu(); closePresentation(); };
+    for (const b of el.querySelectorAll('button')) b.disabled = state.loading;
+    return el;
   }
 
   function renderRecents() {
     const recent = state.recent || [];
     const side = $('#recentList');
-    side.replaceChildren(...recent.map(r => recentItem(r, { removable: true })));
-    $('#recentEmpty').hidden = recent.length > 0;
+    // The open presentation is always listed, as it has the Refresh and Close buttons.
+    const listed = state.presentationId && !state.isMaster && !recent.some(r => r.id === state.presentationId)
+      ? [{ id: state.presentationId, url: state.url, title: state.title, slideCount: state.slideCount, lastOpened: new Date().toISOString() }, ...recent] : recent;
+    side.replaceChildren(...listed.map(r => recentItem(r, { removable: true })));
+    $('#recentEmpty').hidden = listed.length > 0;
 
     const grid = $('#emptyRecent');
     grid.replaceChildren(...recent.slice(0, 6).map(r => {
       const b = document.createElement('button');
-      b.className = 'card';
+      b.className = 'join-row';
       b.type = 'button';
       b.title = r.url;
-      b.innerHTML = `<div class="recent-art" style="${artStyle(r.title)}">${esc(initials(r.title))}</div>
+      b.innerHTML = `<svg class="ic"><use href="#i-slides"/></svg>
         <strong>${esc(r.title)}</strong><span>${plural(r.slideCount, 'slide')} · ${timeAgo(r.lastOpened)}</span>`;
       b.onclick = () => openPresentation(r.url, r.title);
       return b;
     }));
     $('#emptyRecentWrap').hidden = recent.length === 0;
+    renderMasters();
+  }
+
+  // ------------------------------------------------------------------ Master decks
+
+  function renderMasters() {
+    const masters = state.masterDecks || [];
+    $('#masterHead').hidden = !isDesktop && !masters.length;
+    $('#masterList').replaceChildren(...masters.map(m => {
+      const url = `master:${m.id}`;
+      const current = state.presentationId === url && !switching;
+      const opening = switching && switching.id === url;
+      const li = document.createElement('li');
+      li.className = 'recent' + (current ? ' is-current' : '') + (opening ? ' is-opening' : '');
+      li.tabIndex = 0;
+      li.innerHTML = `
+        <div class="recent-art">${current && firstPicture() ? `<img alt="" src="${thumbUrl(1, 160)}">` : '<svg class="ic"><use href="#i-stack"/></svg>'}</div>
+        <div class="recent-text"><strong>${esc(m.name)}</strong><span>${opening ? (switching.refresh ? 'Refreshing…' : 'Opening…') : plural(m.parts.length, 'presentation')}</span></div>
+        ${opening ? '<span class="spinner spinner-sm" aria-label="Loading"></span>'
+          : isDesktop ? '<button class="recent-remove" type="button" aria-label="Edit" title="Edit"><svg class="ic"><use href="#i-edit"/></svg></button>' : ''}`;
+      const open = () => {
+        if (switching) return;
+        if (!current) openPresentation(url, m.name);
+        closeMenu();
+      };
+      li.addEventListener('click', e => {
+        if (e.target.closest('.recent-actions')) return;
+        if (e.target.closest('.recent-remove')) { closeMenu(); editMaster(m); } else open();
+      });
+      if (current) li.append(openDeckActions());
+      li.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target === li) open(); });
+      return li;
+    }));
+    $('#emptyMasters').replaceChildren(...masters.map(m => {
+      const b = document.createElement('button');
+      b.className = 'join-row';
+      b.type = 'button';
+      b.innerHTML = `<svg class="ic"><use href="#i-stack"/></svg><strong>${esc(m.name)}</strong><span>${plural(m.parts.length, 'presentation')}</span>`;
+      b.onclick = () => openPresentation(`master:${m.id}`, m.name);
+      return b;
+    }));
+    $('#emptyMasters').hidden = !masters.length;
+    $('#emptyMasterWrap').hidden = !isDesktop && !masters.length;
+  }
+
+  let editing = null; // the master deck in the editor; its parts also carry what's been looked up
+
+  function editMaster(m) {
+    if (anyDialogOpen()) return;
+    editing = m
+      ? { id: m.id, name: m.name, parts: m.parts.map(p => ({ ...p })) }
+      : { id: '', name: '', parts: [] };
+    $('#masterTitle').textContent = m ? 'Edit master deck' : 'New master deck';
+    $('#masterName').value = editing.name;
+    $('#masterLinks').value = '';
+    $('#masterError').textContent = '';
+    $('#masterDelete').hidden = !m;
+    $('#masterDelete').textContent = 'Delete';
+    renderParts();
+    editing.parts.forEach(lookUp);
+    $('#masterDialog').showModal();
+    (m ? $('#masterLinks') : $('#masterName')).focus();
+  }
+
+  // The deck's current title and slide count, to show which slides the numbers leave. One at a time:
+  // the live pictures use most of the browser's connections, and the rest are for Next and Previous.
+  let lookUps = Promise.resolve();
+  const lookUp = part => { lookUps = lookUps.then(() => lookUpNow(part)); };
+  async function lookUpNow(part) {
+    if (!editing || !editing.parts.includes(part)) return;
+    part.error = null;
+    const same = editing.parts.find(p => p !== part && p.numbers && parseSlidesUrl(p.url).id === parseSlidesUrl(part.url).id);
+    if (same) {
+      part.title = same.title;
+      part.count = same.count;
+      part.numbers = same.numbers;
+      renderParts();
+      return;
+    }
+    try {
+      const d = await api('/api/deck-summary', { body: { url: part.url }, privileged: true });
+      part.title = d.title;
+      part.count = d.slides;
+      part.numbers = Array.from({ length: d.slides }, (_, i) => i + 1).filter(n => !d.skipped.includes(n));
+    } catch (err) {
+      part.error = err.message;
+      part.noAccess = err.data && err.data.code === 'no-access' ? err.data.presentationId : null;
+    }
+    if (editing && editing.parts.includes(part)) renderParts();
+  }
+
+  // The slides of a deck that are shown, by their numbers in it. Skipped ones aren't, and don't use up a place.
+  const shownOf = p => p.numbers ? p.numbers.slice(p.skipStart, Math.max(p.skipStart, p.numbers.length - p.skipEnd)) : null;
+  const shown = p => p.numbers ? shownOf(p).length : null;
+  const rangeOf = p => { const n = shownOf(p); return `<strong>${n[0]}–${n[n.length - 1]}</strong> of ${p.count}`; };
+
+  function renderParts() {
+    const box = $('#masterParts');
+    // Looking up a deck redraws the list: keep the cursor in the number being typed.
+    const at = box.contains(document.activeElement) && document.activeElement.dataset.skip
+      ? [[...box.children].indexOf(document.activeElement.closest('.master-row')), document.activeElement.dataset.skip] : null;
+    $('#masterTable').hidden = !editing.parts.length;
+    $('#masterEmpty').hidden = editing.parts.length > 0;
+    box.replaceChildren(...editing.parts.map((p, i) => {
+      const row = document.createElement('div');
+      row.className = 'master-row';
+      const n = shown(p);
+      const range = p.error ? (p.noAccess
+          ? '<button type="button" class="badge badge-bad badge-action" data-request>No access<svg class="ic"><use href="#i-external"/></svg></button>'
+          : '<span class="badge badge-bad">Can’t read</span>')
+        : n == null ? '<span class="spinner spinner-sm"></span>'
+        : n === 0 ? '<span class="badge badge-muted">No slides</span>'
+        : rangeOf(p);
+      row.innerHTML = `
+        <span class="master-move">
+          <button type="button" data-move="-1" title="Move up" aria-label="Move up" ${i === 0 ? 'disabled' : ''}><svg class="ic"><use href="#i-up"/></svg></button>
+          <button type="button" data-move="1" title="Move down" aria-label="Move down" ${i === editing.parts.length - 1 ? 'disabled' : ''}><svg class="ic"><use href="#i-down"/></svg></button>
+        </span>
+        <span class="master-what" title="${esc(p.error || p.url)}"><strong>${esc(p.title || 'Presentation')}</strong><small>${esc(p.error || p.url)}</small></span>
+        <input class="tf num" type="number" min="0" max="9999" value="${p.skipStart}" data-skip="skipStart" aria-label="Slides to skip from the start of ${esc(p.title || 'this presentation')}">
+        <input class="tf num" type="number" min="0" max="9999" value="${p.skipEnd}" data-skip="skipEnd" aria-label="Slides to skip from the end of ${esc(p.title || 'this presentation')}">
+        <span class="master-range">${range}</span>
+        <button class="btn btn-plain btn-icon" type="button" data-remove title="Remove" aria-label="Remove"><svg class="ic"><use href="#i-x"/></svg></button>`;
+      for (const b of row.querySelectorAll('[data-move]')) b.onclick = () => {
+        const to = i + Number(b.dataset.move);
+        editing.parts.splice(to, 0, editing.parts.splice(i, 1)[0]);
+        renderParts();
+        const next = box.children[to].querySelector(`[data-move="${b.dataset.move}"]`);
+        if (!next.disabled) next.focus();
+      };
+      for (const input of row.querySelectorAll('[data-skip]')) input.oninput = () => {
+        p[input.dataset.skip] = Math.max(0, Math.floor(Number(input.value) || 0));
+        const left = shown(p);
+        if (left != null && !p.error) $('.master-range', row).innerHTML = left === 0
+          ? '<span class="badge badge-muted">No slides</span>' : rangeOf(p);
+        renderTotal();
+      };
+      $('[data-remove]', row).onclick = () => { editing.parts.splice(i, 1); renderParts(); };
+      const request = $('[data-request]', row);
+      if (request) request.onclick = () => requestAccess('presentation', p.noAccess);
+      return row;
+    }));
+    if (at && box.children[at[0]]) $(`[data-skip="${at[1]}"]`, box.children[at[0]]).focus();
+    renderTotal();
+  }
+
+  function renderTotal() {
+    const counts = editing.parts.map(shown);
+    $('#masterTotal').textContent = counts.length && counts.every(n => n != null)
+      ? `${plural(counts.reduce((a, b) => a + b, 0), 'slide')} from ${plural(counts.length, 'presentation')}` : '';
+  }
+
+  function addLinks() {
+    const text = $('#masterLinks').value.trim();
+    if (!text) return true;
+    const links = text.split(/[\s,]+/).filter(Boolean).map(parseSlidesUrl);
+    const good = links.filter(l => l.id);
+    if (!good.length) {
+      $('#masterError').textContent = (links[0] && links[0].error) || 'Paste a Google Slides link first.';
+      return false;
+    }
+    $('#masterError').textContent = '';
+    $('#masterLinks').value = '';
+    for (const l of good) {
+      const part = { url: l.url, title: '', skipStart: 0, skipEnd: 0 };
+      editing.parts.push(part);
+      lookUp(part);
+    }
+    renderParts();
+    return true;
+  }
+  $('#masterAdd').addEventListener('click', addLinks);
+  $('#masterLinks').addEventListener('paste', () => setTimeout(addLinks, 0));
+  $('#masterLinks').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addLinks(); } });
+
+  async function saveMaster(open) {
+    if (!addLinks()) return; // a link still in the box
+    const body = {
+      id: editing.id, name: $('#masterName').value,
+      parts: editing.parts.map(({ url, title, skipStart, skipEnd }) => ({ url, title, skipStart, skipEnd })),
+    };
+    $('#masterSave').disabled = $('#masterOpen').disabled = true;
+    try {
+      const m = await api('/api/masters', { method: 'PUT', body, privileged: true });
+      closeDialog('#masterDialog');
+      const url = `master:${m.id}`;
+      if (state.presentationId === url) {
+        if (open) refresh();
+        else toast(`Saved “${m.name}”. Refresh to show the changes.`, 'ok', { label: 'Refresh', run: refresh });
+      } else if (open) openPresentation(url, m.name);
+      else toast(`Saved “${m.name}”`, 'ok', { label: 'Open', run: () => openPresentation(url, m.name) });
+    } catch (err) {
+      $('#masterError').textContent = err.message;
+    } finally {
+      $('#masterSave').disabled = $('#masterOpen').disabled = false;
+    }
+  }
+  $('#masterForm').addEventListener('submit', e => { e.preventDefault(); saveMaster(false); });
+  $('#masterOpen').addEventListener('click', () => saveMaster(true));
+  $('#masterDelete').addEventListener('click', async e => {
+    const b = e.currentTarget;
+    if (b.textContent === 'Delete') { b.textContent = 'Delete for good?'; return; }
+    try {
+      await api(`/api/masters/${encodeURIComponent(editing.id)}`, { method: 'DELETE', privileged: true });
+      closeDialog('#masterDialog');
+      toast(`Deleted “${editing.name}”. Its presentations are still in Google Slides.`, 'info');
+    } catch (err) { $('#masterError').textContent = err.message; }
+  });
+  for (const id of ['#newMasterBtn', '#emptyNewMaster']) {
+    $(id).hidden = !isDesktop;
+    $(id).addEventListener('click', () => { closeMenu(); editMaster(null); });
   }
 
   function renderRemote() {
     const box = $('#remoteUrls');
-    const section = $('#remoteSection');
-    section.hidden = !isDesktop; // a phone using the remote doesn't need to be told about itself
     if (!info) { box.innerHTML = ''; return; }
     if (info.warning) {
       box.innerHTML = `<p class="remote-off">${esc(info.warning)}</p>`;
     } else if (!info.remoteEnabled) {
-      box.innerHTML = '<p class="remote-off">Off. Turn on “Allow other devices” in Settings.</p>';
+      box.innerHTML = '<p class="remote-off">Off</p>';
     } else if (!info.remoteUrls.length) {
       box.innerHTML = '<p class="remote-off">Not connected to a network.</p>';
     } else {
@@ -374,7 +573,7 @@
         const row = document.createElement('div');
         row.className = 'remote-url';
         row.innerHTML = `<code>${esc(u.replace(/^http:\/\//, '').replace(/\/$/, ''))}</code>
-          <button class="btn btn-ghost btn-icon" type="button" title="Copy link" aria-label="Copy link"><svg class="ic ic-sm"><use href="#i-copy"/></svg></button>`;
+          <button class="btn btn-plain btn-icon" type="button" title="Copy link" aria-label="Copy link"><svg class="ic"><use href="#i-copy"/></svg></button>`;
         $('button', row).onclick = async () => {
           try { await navigator.clipboard.writeText(u); toast('Link copied — open it on your phone or tablet.', 'ok'); }
           catch { toast('Couldn’t copy the link.', 'error'); }
@@ -382,7 +581,6 @@
         return row;
       }));
     }
-    $('#settingsBtn').hidden = !isDesktop;
   }
 
   // ------------------------------------------------------------------ Filmstrip & progress
@@ -402,33 +600,57 @@
   let jumpFilmstrip = true;
   function buildFilmstrip() {
     const strip = $('#filmstrip');
-    const n = state.thumbnailCount;
-    $('#slideCountLabel').textContent = n ? String(n) : '';
-    const items = [];
-    for (let i = 1; i <= n; i++) {
+    const skipped = new Set(state.skipped || []);
+    const places = Array.from({ length: state.thumbnailCount }, (_, i) => i + 1);
+    $('#slideCountLabel').textContent = places.length || '';
+    // In a master deck, where each presentation starts.
+    const starts = new Map(state.isMaster ? state.parts.filter((p, i) => (state.parts[i + 1] ? state.parts[i + 1].stripStart : places.length) > p.stripStart).map(p => [p.stripStart, p]) : []);
+    const items = places.map((n, i) => {
       const b = document.createElement('button');
-      b.className = 'thumb';
+      const skip = skipped.has(n);
+      b.className = 'thumb' + (skip ? ' is-skipped' : '');
       b.type = 'button';
-      b.dataset.n = i;
+      b.dataset.n = n;
       b.setAttribute('role', 'option');
-      b.innerHTML = `<div class="thumb-img"><img loading="lazy" alt="Slide ${i}" src="${thumbUrl(i, 640)}"></div><span class="thumb-label">${i}</span>`;
+      const part = starts.get(i);
+      if (part) b.classList.add('starts-part');
+      b.innerHTML = `${starts.size ? `<span class="thumb-part" title="${part ? esc(part.title) : ''}">${part ? esc(part.title) : ''}</span>` : ''}
+        <div class="thumb-img is-waiting"><img loading="lazy" alt="${skip ? `Skipped slide ${n}` : `Slide ${n}`}" data-place="${n}">${skip ? '<svg class="ic thumb-skip"><use href="#i-skip"/></svg>' : ''}</div>
+        <span class="thumb-label">${n}${skip ? '<span class="badge">Skipped</span>' : ''}</span>`;
       const img = $('img', b);
-      img.onload = () => img.classList.add('is-loaded');
-      b.onclick = () => act(`/api/goto/${i}`);
-      items.push(b);
-    }
+      img.onload = () => { img.classList.add('is-loaded'); img.parentElement.classList.remove('is-waiting'); };
+      if (!skip) b.onclick = () => act(`/api/goto/${n}`);
+      else { b.title = 'Skipped in Google Slides, so it isn’t shown'; b.setAttribute('aria-disabled', 'true'); }
+      return b;
+    });
+    strip.classList.toggle('has-parts', starts.size > 0);
     strip.replaceChildren(...items);
     // A new deck starts at the beginning; the first positioning jumps instead of animating.
     strip.scrollTo({ left: 0, behavior: 'instant' });
     jumpFilmstrip = true;
   }
 
+  // The nearest slide from n (in direction dir) that isn't skipped.
+  function shownSlide(n, dir) {
+    const skipped = new Set(state.skipped || []);
+    while (skipped.has(n)) n += dir;
+    return n;
+  }
+
+  // Pictures arrive after the deck has opened, nearest slides first.
+  function fillPictures() {
+    const missing = new Set(state.missingPictures || []);
+    for (const img of document.querySelectorAll('#filmstrip img[data-place]:not([src])'))
+      if (!missing.has(+img.dataset.place)) img.src = thumbUrl(+img.dataset.place, 640);
+  }
+
   function updateCurrentSlide() {
     const cur = state.slide;
+    const next = shownSlide(cur + 1, 1);
     for (const t of $('#filmstrip').children) {
-      const n = +t.dataset.n;
+      const n = +t.dataset.n || -1;
       t.classList.toggle('is-current', n === cur);
-      t.classList.toggle('is-next', n === cur + 1);
+      t.classList.toggle('is-next', n === next && n !== cur);
       t.setAttribute('aria-selected', String(n === cur));
     }
     const current = $(`#filmstrip [data-n="${cur}"]`);
@@ -480,6 +702,36 @@
     if (state) renderRecents();
   }
 
+  // Google ends sessions after a while. Says so when it happens, and keeps a button up until it's sorted.
+  let expiredToasted = false;
+  function renderGoogleExpired(s) {
+    const b = $('#signInAgain');
+    b.hidden = !s.googleExpired;
+    b.disabled = !isDesktop;
+    if (s.googleExpired && !expiredToasted) {
+      toast(isDesktop
+        ? 'Google has signed you out. Sign in again to open presentations and clips that aren’t public.'
+        : 'Google has signed the presenter computer out. Sign in again there to open presentations that aren’t public.',
+      'error', isDesktop ? { label: 'Sign in again', run: () => signInAgain() } : undefined);
+    }
+    expiredToasted = !!s.googleExpired;
+  }
+  let signingIn = false;
+  async function signInAgain(then) {
+    if (signingIn) return;
+    signingIn = true;
+    try {
+      google = await api('/api/google/signin', { privileged: true });
+      renderGoogle();
+      if (then) then();
+      else toast(`Signed in${google.email ? ` as ${google.email}` : ''}.`, 'ok',
+        state && state.presentationId ? { label: 'Refresh', run: refresh } : undefined);
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally { signingIn = false; }
+  }
+  $('#signInAgain').addEventListener('click', () => signInAgain());
+
   // Opens Google's page for a deck ("presentation") or Drive file ("file") in a window on the app's
   // Google account, where Google's own "Request access" button sends the request. Desktop only.
   async function requestAccess(kind, id) {
@@ -489,16 +741,18 @@
   }
 
   // A failed load; when it's for lack of access, offers to request it.
-  function loadErrorToast(err, id) {
+  function loadErrorToast(err, id, retry) {
     const presentationId = (err.data && err.data.presentationId) || id;
-    if (err.data && err.data.code === 'no-access' && isDesktop && presentationId)
+    if (err.data && err.data.code === 'signed-out' && isDesktop)
+      toast(err.message, 'error', { label: 'Sign in again', run: () => signInAgain(retry) });
+    else if (err.data && err.data.code === 'no-access' && isDesktop && presentationId)
       toast(err.message, 'error', { label: 'Request access', run: () => requestAccess('presentation', presentationId) });
     else
       toast(err.message, 'error');
   }
 
   async function openPresentation(url, title) {
-    const parsed = parseSlidesUrl(url);
+    const parsed = /^master:/.test(url) ? { id: url, url } : parseSlidesUrl(url);
     if (parsed.error || parsed.empty) { toast(parsed.error || 'Paste a Google Slides link first.', 'error'); return false; }
     if (switching) return false;
     // Reloading the deck that's already open is a refresh, not a switch.
@@ -513,7 +767,7 @@
       requestAnimationFrame(startStreams);
       return true;
     } catch (err) {
-      loadErrorToast(err, parsed.id);
+      loadErrorToast(err, parsed.id, () => openPresentation(url, title));
       return false;
     } finally {
       if (isSwitch) setSwitching(null);
@@ -546,6 +800,12 @@
   async function showOpenDialog() {
     if (anyDialogOpen()) return;
     const dlg = $('#openDialog');
+    // Hangs from the Open button; in the middle when the button isn't on screen (start screen, phones).
+    const anchor = $('#openBtn').getBoundingClientRect();
+    const anchored = anchor.width > 0 && anchor.left >= 0;
+    dlg.classList.toggle('no-arrow', !anchored);
+    dlg.style.setProperty('--pop-x', `${anchored ? anchor.left : Math.max(16, (innerWidth - 420) / 2)}px`);
+    dlg.style.setProperty('--pop-y', `${anchored ? anchor.bottom + 10 : 90}px`);
     $('#openUrl').value = '';
     validateOpen();
     $('#clipSuggest').hidden = true;
@@ -581,12 +841,11 @@
       await api('/api/refresh');
       toast('Presentation refreshed', 'ok');
     } catch (err) {
-      loadErrorToast(err, state.presentationId);
+      loadErrorToast(err, state.presentationId, refresh);
     } finally {
       setSwitching(null);
     }
   }
-  $('#refreshBtn').addEventListener('click', refresh);
 
   async function closePresentation() {
     if (!state || !state.presentationId || switching) return;
@@ -597,7 +856,6 @@
         { label: 'Reopen', run: () => openPresentation(reopen.url, reopen.title) });
     } catch (err) { toast(err.message, 'error'); }
   }
-  $('#closeBtn').addEventListener('click', closePresentation);
 
   // ------------------------------------------------------------------ Transport & notes
 
@@ -614,12 +872,13 @@
 
   // ------------------------------------------------------------------ Settings
 
-  async function showSettings() {
+  async function showSettings(pane = 'ndi') {
     if (!isDesktop || anyDialogOpen()) return;
     const form = $('#settingsForm');
     $('#settingsError').textContent = '';
     try {
       const s = await (await fetch('/api/settings')).json();
+      runningSettings = await (await fetch('/api/settings/running')).json();
       form.slidesNdiName.value = s.slidesNdiName;
       form.notesNdiName.value = s.notesNdiName;
       form.ndiDiscoveryServer.value = s.ndiDiscoveryServer || '';
@@ -628,19 +887,33 @@
       form.resolution.value = res;
       if (![...form.frameRate.options].some(o => o.value === String(s.frameRate))) form.frameRate.add(new Option(`${s.frameRate} fps`, s.frameRate));
       form.frameRate.value = String(s.frameRate);
+      form.nextPreview.value = s.nextPreview;
       form.remoteAccess.checked = s.remoteAccess;
       form.apiPort.value = s.apiPort;
       await fillAudio(form, s);
       await fillGoogle();
     } catch { toast('Couldn’t load settings.', 'error'); return; }
+    showPane(pane);
     $('#settingsDialog').showModal();
+    updateRestartNote();
+    if (pane !== 'ndi') return;
     form.slidesNdiName.focus();
     form.slidesNdiName.select();
   }
+  $('#settingsBtn').hidden = !isDesktop;
   $('#settingsBtn').addEventListener('click', () => { closeMenu(); showSettings(); });
-  $('#emptySettingsBtn').addEventListener('click', showSettings);
-  $('#emptySettingsBtn').hidden = !isDesktop;
-  $('#emptyShortcutsBtn').addEventListener('click', () => { if (!anyDialogOpen()) $('#shortcutsDialog').showModal(); });
+
+  function showPane(id) {
+    for (const t of document.querySelectorAll('.s-tab')) {
+      t.classList.toggle('active', t.dataset.pane === id);
+      t.setAttribute('aria-selected', String(t.dataset.pane === id));
+    }
+    for (const p of document.querySelectorAll('.s-pane')) p.hidden = p.dataset.pane !== id;
+    $('.s-content').scrollTop = 0;
+  }
+  for (const t of document.querySelectorAll('.s-tab')) t.addEventListener('click', () => showPane(t.dataset.pane));
+  // A field that stops the form being saved may be on a pane that isn't showing.
+  $('#settingsForm').addEventListener('invalid', e => showPane(e.target.closest('.s-pane').dataset.pane), true);
 
   // Audio settings apply live (no restart), so levels can be set while a video plays.
   async function fillAudio(form, s) {
@@ -695,6 +968,7 @@
     $('#monVolLabel').textContent = `${form.audioMonitorVolume.value}%`;
     form.audioOutputVolume.disabled = form.audioOutputDevice.value === 'none';
     form.audioMonitorVolume.disabled = form.audioMonitorDevice.value === 'none';
+    for (const s of [form.audioOutputVolume, form.audioMonitorVolume]) s.style.setProperty('--p', `${s.value}%`);
   }
   let audioTimer;
   function saveAudio() {
@@ -721,15 +995,21 @@
   for (const name of ['audioOutputDevice', 'audioMonitorDevice', 'audioOutputVolume', 'audioMonitorVolume', 'audioAsioChannel', 'audioAsioBuffer'])
     $('#settingsForm')[name].addEventListener('input', saveAudio);
 
+  // Applies straight away, so it can be judged on the output.
+  $('#settingsForm').nextPreview.addEventListener('change', e =>
+    api('/api/presenter', { method: 'PUT', body: { nextPreview: e.target.value }, privileged: true })
+      .catch(err => { $('#settingsError').textContent = err.message; }));
+
   // The Google account (desktop only) signs in through its own window and applies straight away.
   let google = { signedIn: false, email: null };
   function renderGoogle() {
     const row = $('#googleGroup .account-row');
     row.classList.toggle('is-signed-in', google.signedIn);
-    $('#googleName').textContent = google.signedIn ? (google.email || 'Signed in') : 'Not signed in';
+    $('#googleName').textContent = google.signedIn ? (google.email || 'Signed in') : google.expired ? (google.email || 'Signed out by Google') : 'Not signed in';
     $('#googleHint').hidden = google.signedIn;
+    $('#googleHint').textContent = google.expired ? 'Google has ended the session. Sign in again.' : 'Public decks work without signing in.';
     $('#googleAvatar').textContent = google.signedIn && google.email ? google.email[0] : 'G';
-    $('#googleBtn').textContent = google.signedIn ? 'Sign out' : 'Sign in';
+    $('#googleBtn').textContent = google.signedIn ? 'Sign out' : google.expired ? 'Sign in again' : 'Sign in';
   }
   async function fillGoogle() {
     $('#googleError').textContent = '';
@@ -776,22 +1056,48 @@
     };
   })();
 
-  $('#settingsForm').addEventListener('submit', async e => {
-    e.preventDefault();
-    const f = e.currentTarget;
+  // The settings that are only read when the app starts, as they are in the form.
+  function startupSettings() {
+    const f = $('#settingsForm');
     const [width, height] = f.resolution.value.split('x').map(Number);
-    const body = {
-      slidesNdiName: f.slidesNdiName.value, notesNdiName: f.notesNdiName.value, ndiDiscoveryServer: f.ndiDiscoveryServer.value,
+    return {
+      slidesNdiName: f.slidesNdiName.value.trim(), notesNdiName: f.notesNdiName.value.trim(), ndiDiscoveryServer: f.ndiDiscoveryServer.value.trim(),
       width, height, frameRate: Number(f.frameRate.value),
       remoteAccess: f.remoteAccess.checked, apiPort: Number(f.apiPort.value),
     };
+  }
+  let runningSettings = null; // what this run of the app started with
+  function updateRestartNote() {
+    const now = startupSettings();
+    $('#settingsNote').hidden = !runningSettings || Object.keys(now).every(k => now[k] === runningSettings[k]);
+  }
+  $('#settingsForm').addEventListener('input', updateRestartNote);
+
+  function offerRestart() {
+    $('#restartText').textContent = state && state.presentationId
+      ? 'The outputs stop for a few seconds, and the presentation starts again from its first slide.'
+      : 'The outputs stop for a few seconds.';
+    $('#restartDialog').showModal();
+    $('#restartNow').focus();
+  }
+  $('#restartDue').addEventListener('click', () => { if (!anyDialogOpen()) offerRestart(); });
+  $('#restartNow').addEventListener('click', async () => {
+    closeDialog('#restartDialog');
+    toast('Restarting…', 'info');
+    await api('/api/app/restart', { privileged: true }).catch(() => {});
+  });
+
+  $('#settingsForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const body = startupSettings();
     const save = $('#settingsSave');
     save.disabled = true;
     try {
-      await api('/api/settings', { method: 'PUT', body, privileged: true });
+      const r = await api('/api/settings', { method: 'PUT', body, privileged: true });
       closeDialog('#settingsDialog');
-      toast('Settings saved. Restarting…', 'ok');
-      await api('/api/app/restart', { privileged: true }).catch(() => {});
+      $('#restartDue').hidden = !r.restartRequired;
+      if (r.restartRequired) offerRestart();
+      else toast('Settings saved.', 'ok');
     } catch (err) {
       $('#settingsError').textContent = err.message;
     } finally {
@@ -803,7 +1109,6 @@
 
   const anyDialogOpen = () => !!document.querySelector('dialog[open]');
   function closeDialog(sel) { const d = $(sel); if (d.open) d.close(); }
-  $('#shortcutsBtn').addEventListener('click', () => { closeMenu(); if (!anyDialogOpen()) $('#shortcutsDialog').showModal(); });
   for (const d of document.querySelectorAll('dialog')) {
     // A click on the backdrop closes the dialog, but only if the press also started there:
     // dragging out of a text field to select text must not close it.
@@ -848,7 +1153,10 @@
     if (e.key === 'Enter' && gotoBuffer) {
       const n = parseInt(gotoBuffer, 10);
       gotoBuffer = ''; showGoto();
-      if (n >= 1 && n <= state.slideCount) act(`/api/goto/${n}`);
+      if (n >= 1 && n <= state.slideCount) {
+        act(`/api/goto/${n}`);
+        if ((state.skipped || []).includes(n)) toast(`Slide ${n} is skipped in Google Slides, so it isn’t shown.`, 'info');
+      }
       else toast(`There's no slide ${n}.`, 'error');
       handled(); return;
     }
@@ -869,13 +1177,37 @@
       case '-': case '_': act('/api/notes/decrease'); handled(); break;
       case 'a': case 'A': act('/api/notes/autofit/toggle'); handled(); break;
       case 'r': case 'R': refresh(); handled(); break;
-      case '?': $('#shortcutsDialog').showModal(); handled(); break;
+      case '?': showSettings('shortcuts'); handled(); break;
     }
   });
+
+  // ------------------------------------------------------------------ Window buttons
+
+  // The top bar is the window's title bar, so it has the caption buttons too (see MainForm.cs).
+  const host = isDesktop && window.chrome && window.chrome.webview;
+  if (host) {
+    document.body.classList.add('has-frame');
+    $('.win-buttons').addEventListener('click', e => {
+      const b = e.target.closest('[data-win]');
+      if (b) host.postMessage(`window:${b.dataset.win}`);
+    });
+    host.addEventListener('message', e => {
+      if (e.data === 'window:normal' || e.data === 'window:maximized') {
+        const max = e.data === 'window:maximized';
+        document.body.classList.toggle('is-maximized', max);
+        $('[data-win="maximize"]').title = max ? 'Restore' : 'Maximise';
+      }
+    });
+    host.postMessage('window:ready');
+  }
 
   // ------------------------------------------------------------------ Start
 
   connect();
+  if (isDesktop) Promise.all(['/api/settings', '/api/settings/running'].map(u => fetch(u).then(r => r.json()))).then(([saved, running]) => {
+    $('#restartDue').hidden = ['slidesNdiName', 'notesNdiName', 'ndiDiscoveryServer', 'width', 'height', 'frameRate', 'remoteAccess', 'apiPort']
+      .every(k => saved[k] === running[k]);
+  }).catch(() => {});
   loadInfo();
   startStreams();
   new MutationObserver(() => { if (app.dataset.view === 'stage') startStreams(); })

@@ -4,7 +4,8 @@ using System.Text.RegularExpressions;
 namespace GoogleSlidesNdiPresenter;
 
 /// <summary>
-/// A video or audio clip on a slide, as set up in Google Slides.
+/// A video or audio clip on a slide, as set up in Google Slides. Slide is the slide's number in the
+/// show.
 /// Start is "automatic", "on click" or "manual"; Muted is whether the clip starts muted.
 /// Source is "drive" or "youtube" (FileId is then the Drive file id or the YouTube video id).
 /// Access says whether it will play here: "ok", "no access" (a Drive file not shared with this
@@ -18,6 +19,10 @@ public sealed record SlideMedia(int Slide, string PageId, string Kind, string? N
 /// Reads the audio and video on each slide from the model data embedded in the deck's page
 /// (the same page the title and revision come from). Google doesn't document this format, so
 /// everything here is best effort: anything unexpected is skipped rather than failing the load.
+///
+/// The page splits the model over several scripts, each with "var modelChunk = {...}". The entries
+/// are in {"parts":[{"commands":[...]}],"revision":N}; until late 2026 they were in {"chunk":[...]},
+/// which is still read in case Google serves it.
 ///
 /// What the model looks like (one entry per object, entries are arrays):
 ///   [12, pageId, index, kind, ...]          a page; kind 0 = slide (1 layout, 2 master), index = slide order
@@ -38,26 +43,8 @@ public static partial class SlideMediaParser
     {
         try
         {
-            var entries = new List<JsonArray>();
-            foreach (Match m in ChunkRegex().Matches(html))
-            {
-                try
-                {
-                    if (JsonNode.Parse(m.Groups[1].Value)?["chunk"] is JsonArray chunk)
-                        entries.AddRange(chunk.OfType<JsonArray>());
-                }
-                catch
-                {
-                    // A chunk we can't read: skip it.
-                }
-            }
-
-            // Slides in order; their index becomes the slide number the player shows.
-            var slideNumbers = entries
-                .Where(e => Int(e, 0) == 12 && Int(e, 3) == 0 && Str(e, 1) != null)
-                .OrderBy(e => Int(e, 2) ?? int.MaxValue)
-                .Select((e, i) => (Id: Str(e, 1)!, Number: i + 1))
-                .ToDictionary(p => p.Id, p => p.Number);
+            var entries = AllEntries(html);
+            var slideNumbers = SlideIds(entries).Select((id, i) => (id, Number: i + 1)).ToDictionary(p => p.id, p => p.Number);
 
             var names = entries.Where(e => Int(e, 0) == 44 && Str(e, 1) != null)
                 .GroupBy(e => Str(e, 1)!)
@@ -100,6 +87,47 @@ public static partial class SlideMediaParser
         {
             return [];
         }
+    }
+
+    /// <summary>The ids of all the deck's slides in order, including skipped ones (empty if unreadable).</summary>
+    public static IReadOnlyList<string> PageIds(string html)
+    {
+        try { return SlideIds(AllEntries(html)); }
+        catch { return []; }
+    }
+
+    private static List<string> SlideIds(List<JsonArray> entries) => entries
+        .Where(e => Int(e, 0) == 12 && Int(e, 3) == 0 && Str(e, 1) != null)
+        .OrderBy(e => Int(e, 2) ?? int.MaxValue)
+        .Select(e => Str(e, 1)!)
+        .Distinct()
+        .ToList();
+
+    private static List<JsonArray> AllEntries(string html)
+    {
+        var entries = new List<JsonArray>();
+        foreach (Match m in ChunkRegex().Matches(html))
+        {
+            try
+            {
+                entries.AddRange(Entries(JsonNode.Parse(m.Groups[1].Value)));
+            }
+            catch
+            {
+                // A chunk we can't read: skip it.
+            }
+        }
+        return entries;
+    }
+
+    /// <summary>The entries in one model chunk, from its parts or (the older layout) directly in "chunk".</summary>
+    private static IEnumerable<JsonArray> Entries(JsonNode? model)
+    {
+        if (model is not JsonObject o) return [];
+        if (o["parts"] is JsonArray parts)
+            return parts.OfType<JsonObject>()
+                .SelectMany(p => p["commands"] is JsonArray commands ? commands.OfType<JsonArray>() : []);
+        return o["chunk"] is JsonArray chunk ? chunk.OfType<JsonArray>() : [];
     }
 
     private static Dictionary<int, JsonNode?> Props(JsonArray list)

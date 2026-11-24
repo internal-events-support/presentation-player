@@ -138,7 +138,7 @@ public static class FrameRenderer
     /// and next slide on the left, scrollable speaker notes on the right.
     /// </summary>
     public static PresenterBackground RenderPresenterBackground(
-        string? notes, int index, int count, byte[]? nextPng, bool hasNext,
+        NoteText? notes, int index, int count, byte[]? nextPng, bool hasNext, bool nextHalfWidth,
         float fontSize, bool autoFit, float minFontSize, float maxFontSize, float scroll, int width, int height)
     {
         var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
@@ -149,10 +149,13 @@ public static class FrameRenderer
 
         var u = width / 1920f; // layout unit, so other resolutions scale proportionally
         var margin = 40 * u;
-        var leftW = width * 0.44f;
         using var labelFont = new Font("Segoe UI", 28 * u, FontStyle.Bold, GraphicsUnit.Pixel);
         using var mutedBrush = new SolidBrush(Muted);
         var labelH = labelFont.GetHeight(g);
+        var leftW = width * 0.44f;
+        // Two full-width slides have to fit one above the other.
+        if (!nextHalfWidth)
+            leftW = Math.Min(leftW, (height - margin * 2 - (labelH + 8 * u) * 2 - 28 * u) / 2 * 16 / 9);
 
         // Current slide
         var currentLabel = count > 0 ? $"CURRENT  ·  SLIDE {index + 1} / {count}" : "NO PRESENTATION LOADED";
@@ -162,7 +165,7 @@ public static class FrameRenderer
         // Next slide
         var nextLabelY = currentRect.Bottom + 28 * u;
         g.DrawString("NEXT", labelFont, mutedBrush, margin, nextLabelY);
-        var nextW = Math.Min(leftW * 0.8f, (height - margin - (nextLabelY + labelH + 8 * u)) * 16 / 9);
+        var nextW = nextHalfWidth ? leftW / 2 : leftW;
         var nextRect = new RectangleF(margin, nextLabelY + labelH + 8 * u, nextW, nextW * 9 / 16);
         if (nextPng != null)
         {
@@ -189,7 +192,7 @@ public static class FrameRenderer
         var view = new RectangleF(notesX, margin + labelH + 8 * u, notesW, height - (margin + labelH + 8 * u) - margin);
 
         float maxScroll = 0;
-        if (string.IsNullOrWhiteSpace(notes))
+        if (notes == null || string.IsNullOrWhiteSpace(notes.Text))
         {
             if (count > 0)
             {
@@ -200,18 +203,35 @@ public static class FrameRenderer
         }
         else
         {
-            using var format = new StringFormat();
-            if (autoFit)
-                fontSize = LargestFittingFontSize(g, notes, format, view.Size, minFontSize, maxFontSize);
-            using var font = new Font("Segoe UI", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
-            var textH = g.MeasureString(notes, font, new SizeF(view.Width, 100_000), format).Height;
-            maxScroll = Math.Max(0, textH - view.Height);
-            scroll = Math.Clamp(scroll, 0, maxScroll);
+            var text = notes.Text;
+            if (NotesLayout.CanLayOut(text))
+            {
+                var state = g.Save();
+                using var layout = new NotesLayout(g, notes);
+                fontSize = autoFit
+                    ? layout.LargestFitting(view.Size, minFontSize, maxFontSize)
+                    : Math.Min(fontSize, layout.WholeWordSize(view.Width));
+                maxScroll = Math.Max(0, layout.Height(fontSize, view.Width) - view.Height);
+                scroll = Math.Clamp(scroll, 0, maxScroll);
+                g.SetClip(view);
+                layout.Draw(Brushes.White, fontSize, view, scroll);
+                g.Restore(state);
+            }
+            else
+            {
+                using var format = new StringFormat();
+                if (autoFit)
+                    fontSize = LargestFittingFontSize(g, text, format, view.Size, minFontSize, maxFontSize);
+                using var font = new Font("Segoe UI", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
+                var textH = g.MeasureString(text, font, new SizeF(view.Width, 100_000), format).Height;
+                maxScroll = Math.Max(0, textH - view.Height);
+                scroll = Math.Clamp(scroll, 0, maxScroll);
 
-            var state = g.Save();
-            g.SetClip(view);
-            g.DrawString(notes, font, Brushes.White, new RectangleF(view.X, view.Y - scroll, view.Width, textH + fontSize), format);
-            g.Restore(state);
+                var state = g.Save();
+                g.SetClip(view);
+                g.DrawString(text, font, Brushes.White, new RectangleF(view.X, view.Y - scroll, view.Width, textH + fontSize), format);
+                g.Restore(state);
+            }
 
             // Scroll indicators
             using var arrowFont = new Font("Segoe UI", 26 * u, FontStyle.Bold, GraphicsUnit.Pixel);

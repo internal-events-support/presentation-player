@@ -8,7 +8,16 @@ using Windows.Storage.Streams;
 
 namespace GoogleSlidesNdiPresenter;
 
-public sealed record LoadedPresentation(string Id, string Title, IReadOnlyList<byte[]> SlidePngs, IReadOnlyList<string> Notes, long? Revision, IReadOnlyList<SlideMedia> Media);
+/// <summary>
+/// A deck as opened. Slides are all of its slides, including skipped (hidden) ones; their pictures
+/// come later (<see cref="PresentationLoader.LoadPicturesAsync"/>). MediaAccess is Media once it's
+/// known whether each clip can be played.
+/// </summary>
+public sealed record LoadedPresentation(string Id, string Title, IReadOnlyList<DeckSlide> Slides, long? Revision, IReadOnlyList<SlideMedia> Media,
+    Task<IReadOnlyList<SlideMedia>> MediaAccess);
+
+/// <summary>What the master deck editor shows about a deck.</summary>
+public sealed record DeckSummary(string Id, string Title, int Slides, IReadOnlyList<int> Skipped);
 
 /// <summary>
 /// Downloads a Google Slides presentation without OAuth by using Google's export endpoints:
@@ -30,7 +39,11 @@ public static partial class PresentationLoader
     public interface IGoogleSession
     {
         bool SignedIn { get; }
+        /// <summary>Google has ended the session, so the account has to sign in again.</summary>
+        bool Expired { get; }
         string? Email { get; }
+        /// <summary>Checks whether Google still accepts the session.</summary>
+        Task CheckAsync();
         Task<IReadOnlyList<Cookie>> GetCookiesAsync();
     }
 
@@ -62,51 +75,240 @@ public static partial class PresentationLoader
 
     public static async Task<LoadedPresentation> LoadAsync(string url, int width, int height, CancellationToken ct = default)
     {
+        try
+        {
+            return await OpenAsync(url, width, height, ct);
+        }
+        catch (NoAccessException) when (Google is { SignedIn: true } google)
+        {
+            // Being refused may mean Google has just ended the session; then say that instead.
+            await google.CheckAsync();
+            if (!google.Expired) throw;
+            return await OpenAsync(url, width, height, ct); // signed out it may be public; otherwise the error says to sign in
+        }
+    }
+
+    private static async Task<LoadedPresentation> OpenAsync(string url, int width, int height, CancellationToken ct)
+    {
         var id = ExtractId(url) ?? throw new ArgumentException(
             "That doesn't look like a Google Slides link. Use the normal share link " +
             "(https://docs.google.com/presentation/d/<id>/edit).");
 
         await Cookies.SyncAsync(Google);
-        var baseUrl = $"https://docs.google.com/presentation/d/{id}/export";
+        // The player's page has the slides and notes, the editor's page the title, revision and media.
+        // Both are small, so the deck opens quickly; the pictures follow.
         var pageTask = FetchPageInfoAsync(id, ct);
-        var mediaTask = CheckMediaAsync(pageTask, ct);
-        var pdfTask = DownloadAsync($"{baseUrl}/pdf", "%PDF"u8.ToArray(), ct);
-        var pptxTask = DownloadAsync($"{baseUrl}/pptx", "PK"u8.ToArray(), ct);
-        await Task.WhenAll(pdfTask, pptxTask);
-
-        var slides = await RenderPdfAsync(pdfTask.Result, width, height);
-        var notesInfo = ParsePptxNotes(pptxTask.Result);
+        var player = await FetchPlayerPagesAsync(id, ct);
         var page = await pageTask;
-        var media = await mediaTask;
-        var title = page.Title ?? ParsePptxTitle(pptxTask.Result);
 
-        // Align notes to rendered pages. Depending on Google's export, skipped slides may or may
-        // not appear in the PDF, so match whichever count lines up.
-        List<string> notes;
-        var visible = notesInfo.Where(n => !n.Hidden).Select(n => n.Notes).ToList();
-        if (notesInfo.Count == slides.Count)
-            notes = notesInfo.Select(n => n.Notes).ToList();
-        else if (visible.Count == slides.Count)
-            notes = visible;
+        IReadOnlyList<DeckSlide> slides;
+        var title = page.Title;
+        if (player.Count > 0)
+        {
+            slides = DeckAlignment.FromPlayer(player);
+        }
         else
-            notes = Enumerable.Range(0, slides.Count)
-                .Select(i => i < notesInfo.Count ? notesInfo[i].Notes : "").ToList();
+        {
+            // Couldn't read the player's page: fall back to the exports, which also say why if there's no access.
+            var baseUrl = $"https://docs.google.com/presentation/d/{id}/export";
+            var pdfTask = DownloadAsync($"{baseUrl}/pdf", "%PDF"u8.ToArray(), ct);
+            var pptxTask = DownloadAsync($"{baseUrl}/pptx", "PK"u8.ToArray(), ct);
+            await Task.WhenAll(pdfTask, pptxTask);
+            var pngs = new List<byte[]>();
+            await RenderPdfAsync(pdfTask.Result, width, height, (_, png) => pngs.Add(png), ct);
+            title ??= ParsePptxTitle(pptxTask.Result);
+            slides = DeckAlignment.Align(ParsePptxNotes(pptxTask.Result), pngs, page.PageIds, player);
+        }
 
-        return new LoadedPresentation(id, string.IsNullOrWhiteSpace(title) ? "Untitled presentation" : title, slides, notes, page.Revision, media);
+        ReuseCachedPictures(id, page.Revision, slides);
+        return new LoadedPresentation(id, string.IsNullOrWhiteSpace(title) ? "Untitled presentation" : title, slides, page.Revision, page.Media,
+            CheckMediaAsync(page.Media, ct));
     }
 
-    private static async Task<IReadOnlyList<SlideMedia>> CheckMediaAsync(Task<PageInfo> pageTask, CancellationToken ct)
+    // Pictures of recently opened decks, by deck and revision, so going back to an unchanged deck is instant.
+    private const int CachedDecks = 8;
+    private static readonly List<(string Id, long Revision, Dictionary<string, SlidePicture> Pictures)> PictureCache = [];
+
+    private static void ReuseCachedPictures(string id, long? revision, IReadOnlyList<DeckSlide> slides)
     {
+        lock (PictureCache)
+        {
+            foreach (var (cachedId, cachedRevision, pictures) in PictureCache)
+            {
+                if (cachedId != id) continue;
+                // Pictures from another revision stand in until the new ones arrive.
+                foreach (var s in slides)
+                    if (s.PageId != null && pictures.TryGetValue(s.PageId, out var p))
+                        s.Picture.Offer(p.Data, cachedRevision == revision ? p.Quality : PictureQuality.Old);
+            }
+        }
+    }
+
+    private static void CachePictures(LoadedPresentation deck)
+    {
+        if (deck.Revision is not { } revision) return;
+        var pictures = deck.Slides.Where(s => s.PageId != null && s.Picture.Quality >= PictureQuality.Preview)
+            .GroupBy(s => s.PageId!).ToDictionary(g => g.Key, g => g.First().Picture);
+        if (pictures.Count == 0) return;
+        lock (PictureCache)
+        {
+            PictureCache.RemoveAll(c => c.Id == deck.Id);
+            PictureCache.Insert(0, (deck.Id, revision, pictures));
+            if (PictureCache.Count > CachedDecks) PictureCache.RemoveRange(CachedDecks, PictureCache.Count - CachedDecks);
+        }
+    }
+
+    // Google only allows a handful of exports of a deck at once ("429 Too Many Requests").
+    private const int PreviewWorkers = 2;
+    private const int PreviewsAhead = 5;
+
+    /// <summary>
+    /// Gets the deck's pictures. Google takes a while to make the PDF with all of them, so meanwhile the
+    /// slides next to <paramref name="current"/> are fetched one by one at a lower resolution.
+    /// </summary>
+    public static async Task LoadPicturesAsync(LoadedPresentation deck, int width, int height, Func<int> current, Action changed, CancellationToken ct)
+    {
+        if (deck.Slides.All(s => s.Picture.Quality == PictureQuality.Full)) return;
+        var taken = new HashSet<int>();
+        var pdfFailed = false;
+        long quietUntil = 0;
+        using var previews = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+        // The PDF is asked for first: it's the one request that brings everything.
+        var pdfTask = DownloadAsync($"https://docs.google.com/presentation/d/{deck.Id}/export/pdf", "%PDF"u8.ToArray(), ct, retry: true);
+        var previewTask = Task.WhenAll(Enumerable.Range(0, PreviewWorkers).Select(_ => PreviewsAsync(previews.Token)));
+        try
+        {
+            var pdf = await pdfTask;
+            IReadOnlyList<int>? places = null;
+            await RenderPdfAsync(pdf, width, height, (page, png) =>
+            {
+                if (places != null && page < places.Count && deck.Slides[places[page]].Picture.Offer(png, PictureQuality.Full)) changed();
+            }, ct, pages => places = DeckAlignment.PdfPages(deck.Slides, pages));
+            // Hidden slides may not be in the PDF; their previews are all there is.
+            if (deck.Slides.All(s => s.Picture.Quality >= PictureQuality.Preview)) previews.Cancel();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+        {
+            // Downloading may be turned off for this deck: get every slide's preview instead.
+        }
+        finally
+        {
+            Volatile.Write(ref pdfFailed, true); // from here on, whatever is still missing is up to the previews
+            CachePictures(deck); // even if another deck is being opened before they've all arrived
+        }
+        try { await previewTask; } catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+        CachePictures(deck);
+
+        async Task PreviewsAsync(CancellationToken stop)
+        {
+            var refusals = 0;
+            while (refusals < 12)
+            {
+                int place;
+                bool finishing;
+                lock (taken)
+                {
+                    finishing = Volatile.Read(ref pdfFailed);
+                    var at = current();
+                    place = Enumerable.Range(0, deck.Slides.Count)
+                        .Where(i => !taken.Contains(i) && deck.Slides[i].PageId != null && deck.Slides[i].Picture.Quality < PictureQuality.Preview)
+                        .Where(i => finishing || (i >= at - 1 && i <= at + PreviewsAhead))
+                        .OrderBy(i => i >= at ? i - at : (at - i) * 3) // what's coming up matters most
+                        .DefaultIfEmpty(-1).First();
+                    if (place >= 0) taken.Add(place);
+                }
+                if (place < 0)
+                {
+                    if (finishing) return;
+                    await Task.Delay(400, stop); // the PDF is on its way; the operator may move on meanwhile
+                    continue;
+                }
+
+                var wait = Interlocked.Read(ref quietUntil) - Environment.TickCount64;
+                if (wait > 0) await Task.Delay((int)wait, stop);
+                var slide = deck.Slides[place];
+                try
+                {
+                    using var resp = await Http.GetAsync(
+                        $"https://docs.google.com/presentation/d/{deck.Id}/export/jpeg?id={deck.Id}&pageid={Uri.EscapeDataString(slide.PageId!)}", stop);
+                    if (IsBusy(resp.StatusCode))
+                    {
+                        refusals++;
+                        Interlocked.Exchange(ref quietUntil, Environment.TickCount64 + Math.Min(15000, 1500 * refusals));
+                        lock (taken) taken.Remove(place); // it'll be tried again
+                        continue;
+                    }
+                    if (!resp.IsSuccessStatusCode || resp.Content.Headers.ContentType?.MediaType is not ("image/jpeg" or "image/png")) continue;
+                    if (slide.Picture.Offer(await resp.Content.ReadAsByteArrayAsync(stop), PictureQuality.Preview)) changed();
+                }
+                catch (HttpRequestException) { /* try the next one */ }
+                catch (TaskCanceledException) when (!stop.IsCancellationRequested) { /* timed out */ }
+            }
+        }
+    }
+
+    /// <summary>Google is asking to slow down, or having a moment: worth trying again shortly.</summary>
+    private static bool IsBusy(HttpStatusCode status) =>
+        status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout;
+
+    /// <summary>Loads every deck of a master deck (a few at a time), in order.</summary>
+    public static async Task<IReadOnlyList<LoadedPresentation>> LoadPartsAsync(MasterDeck master, int width, int height, CancellationToken ct = default)
+    {
+        if (master.Parts.Count == 0) throw new InvalidOperationException("This master deck has no presentations in it yet.");
+        using var gate = new SemaphoreSlim(6);
+        // The same deck can be in there more than once; it only needs downloading once.
+        var byId = new Dictionary<string, Task<LoadedPresentation>>();
+        var tasks = new List<Task<LoadedPresentation>>();
+        foreach (var (part, i) in master.Parts.Select((p, i) => (p, i)))
+        {
+            var id = ExtractId(part.Url) ?? throw new InvalidOperationException($"Link {i + 1} of this master deck isn't a Google Slides link.");
+            if (!byId.TryGetValue(id, out var task))
+                byId[id] = task = LoadGatedAsync(part, i);
+            tasks.Add(task);
+        }
+        return await Task.WhenAll(tasks);
+
+        async Task<LoadedPresentation> LoadGatedAsync(MasterPart part, int i)
+        {
+            await gate.WaitAsync(ct);
+            try { return await LoadAsync(part.Url, width, height, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var name = string.IsNullOrWhiteSpace(part.Title) ? $"presentation {i + 1}" : $"“{part.Title}”";
+                var message = $"Couldn't load {name} from the master deck. {ex.Message}";
+                if (ex is NoAccessException) throw new NoAccessException(message, ExtractId(part.Url));
+                throw new InvalidOperationException(message, ex);
+            }
+            finally { gate.Release(); }
+        }
+    }
+
+    /// <summary>A deck's title, how many slides it has and which are skipped, without downloading it.</summary>
+    public static async Task<DeckSummary> SummariseAsync(string url, CancellationToken ct = default)
+    {
+        var id = ExtractId(url) ?? throw new ArgumentException("That doesn't look like a Google Slides link.");
+        await Cookies.SyncAsync(Google);
+        var pageTask = FetchPageInfoAsync(id, ct);
+        var pages = await FetchPlayerPagesAsync(id, ct);
         var page = await pageTask;
+        var count = pages.Count > 0 ? pages.Count : page.PageIds.Count;
+        if (count == 0) throw NoAccess(id);
+        return new DeckSummary(id, page.Title ?? "Untitled presentation", count,
+            Enumerable.Range(1, pages.Count).Where(n => pages[n - 1].Hidden).ToList());
+    }
+
+    private static async Task<IReadOnlyList<SlideMedia>> CheckMediaAsync(IReadOnlyList<SlideMedia> media, CancellationToken ct)
+    {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(15));
-        var checks = page.Media
+        var checks = media
             .Where(m => m.FileId != null)
             .Select(m => (m.Source, Id: m.FileId!))
             .Distinct()
             .ToDictionary(k => k, k => CheckAccessAsync(k.Source, k.Id, timeout.Token));
         try { await Task.WhenAll(checks.Values); } catch { /* individual failures are reported as null */ }
-        return page.Media
+        return media
             .Select(m => m.FileId != null && checks.TryGetValue((m.Source, m.FileId), out var t) && t.IsCompletedSuccessfully
                 ? m with { Access = t.Result }
                 : m)
@@ -145,11 +347,12 @@ public static partial class PresentationLoader
         return host.StartsWith("accounts.", StringComparison.OrdinalIgnoreCase) ? "no access" : "ok";
     }
 
-    private static async Task<byte[]> DownloadAsync(string url, byte[] magic, CancellationToken ct)
+    private static async Task<byte[]> DownloadAsync(string url, byte[] magic, CancellationToken ct, bool retry = false)
     {
-        using var resp = await Http.GetAsync(url, ct);
+        using var resp = await GetAsync(url, retry ? 8 : 2, ct);
         if (resp.StatusCode is HttpStatusCode.NotFound)
         {
+            if (Google?.Expired == true) throw NoAccess();
             // Signed in, Google hides decks the account can't open behind a 404.
             if (Google?.SignedIn == true)
                 throw new NoAccessException("Presentation not found. Check the link, and that it's shared with " + AccountName() + ".");
@@ -167,22 +370,39 @@ public static partial class PresentationLoader
         return bytes;
     }
 
+    private static async Task<HttpResponseMessage> GetAsync(string url, int attempts, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var resp = await Http.GetAsync(url, ct);
+            if (!IsBusy(resp.StatusCode) || attempt >= attempts) return resp;
+            resp.Dispose();
+            await Task.Delay(Math.Min(20000, 1000 * (1 << attempt)), ct);
+        }
+    }
+
     private static string AccountName() => Google?.Email ?? "the Google account you're signed in with";
 
     /// <summary>The deck exists (or may) but the signed-in account, or anyone without signing in, can't open it.</summary>
-    public sealed class NoAccessException(string message) : InvalidOperationException(message);
+    public sealed class NoAccessException(string message, string? deckId = null) : InvalidOperationException(message)
+    {
+        /// <summary>The deck, when it's one of several.</summary>
+        public string? DeckId { get; } = deckId;
+    }
 
-    private static NoAccessException NoAccess() => new(Google?.SignedIn == true
+    private static NoAccessException NoAccess(string? deckId = null) => new(Google?.Expired == true
+        ? $"Google has signed {AccountName()} out, so this presentation can't be opened. Sign in again to open it."
+        : Google?.SignedIn == true
         ? $"{AccountName()} can't open this presentation. Ask the owner to share it with that account, " +
           "or to share it as \"Anyone with the link can view\"."
         : "This presentation isn't shared publicly. Share it as \"Anyone with the link can view\", " +
-          "or sign in to a Google account that can open it (Settings → Google account).");
+          "or sign in to a Google account that can open it (Settings → Google account).", deckId);
 
     /// <summary>
     /// Sends the signed-in account's Google cookies with every request, redirects included.
     /// Redirects are followed here so the cookie jar can be swapped between loads (sign in/out).
     /// </summary>
-    private sealed class GoogleCookieHandler() : DelegatingHandler(new SocketsHttpHandler { UseCookies = false, AllowAutoRedirect = false })
+    private sealed class GoogleCookieHandler() : DelegatingHandler(new SocketsHttpHandler { UseCookies = false, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All })
     {
         private volatile CookieContainer _jar = new();
 
@@ -228,7 +448,7 @@ public static partial class PresentationLoader
         }
     }
 
-    private static async Task<List<byte[]>> RenderPdfAsync(byte[] pdf, int width, int height)
+    private static async Task RenderPdfAsync(byte[] pdf, int width, int height, Action<int, byte[]> rendered, CancellationToken ct, Action<int>? opened = null)
     {
         using var input = new InMemoryRandomAccessStream();
         var writer = input.AsStreamForWrite();
@@ -237,9 +457,10 @@ public static partial class PresentationLoader
         input.Seek(0);
 
         var doc = await PdfDocument.LoadFromStreamAsync(input);
-        var result = new List<byte[]>((int)doc.PageCount);
+        opened?.Invoke((int)doc.PageCount);
         for (uint i = 0; i < doc.PageCount; i++)
         {
+            ct.ThrowIfCancellationRequested();
             using var page = doc.GetPage(i);
             var size = page.Size;
             var scale = Math.Min(width / size.Width, height / size.Height);
@@ -254,12 +475,9 @@ public static partial class PresentationLoader
             output.Seek(0);
             using var ms = new MemoryStream();
             await output.AsStreamForRead().CopyToAsync(ms);
-            result.Add(ms.ToArray());
+            rendered((int)i, ms.ToArray());
         }
-        return result;
     }
-
-    private sealed record SlideNotes(bool Hidden, string Notes);
 
     [GeneratedRegex(@"<title>(.*?)</title>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex TitleRegex();
@@ -274,7 +492,30 @@ public static partial class PresentationLoader
     public static async Task<long?> FetchRevisionAsync(string id, CancellationToken ct = default) =>
         (await FetchPageInfoAsync(id, ct)).Revision;
 
-    private sealed record PageInfo(string? Title, long? Revision, IReadOnlyList<SlideMedia> Media);
+    private sealed record PageInfo(string? Title, long? Revision, IReadOnlyList<SlideMedia> Media, IReadOnlyList<string> PageIds);
+
+    /// <summary>
+    /// The slides as Google's player has them, from the data embedded in its page: their ids, how many
+    /// clicks their animations take, and whether something starts by itself. Empty if it can't be read.
+    /// </summary>
+    private static async Task<IReadOnlyList<PlayerPage>> FetchPlayerPagesAsync(string id, CancellationToken ct)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"https://docs.google.com/presentation/d/{id}/embed?start=false");
+            req.Headers.AcceptLanguage.ParseAdd("en-US");
+            using var resp = await Http.SendAsync(req, ct);
+            return resp.IsSuccessStatusCode ? DeckAlignment.ParsePlayerPages(await resp.Content.ReadAsStringAsync(ct)) : [];
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return [];
+        }
+    }
 
     /// <summary>
     /// Reads the presentation's normal page for its name (from the page title, "Name - Google Slides")
@@ -287,9 +528,9 @@ public static partial class PresentationLoader
             using var req = new HttpRequestMessage(HttpMethod.Get, $"https://docs.google.com/presentation/d/{id}/edit");
             req.Headers.AcceptLanguage.ParseAdd("en-US");
             using var resp = await Http.SendAsync(req, ct);
-            if (!resp.IsSuccessStatusCode) return new(null, null, []);
+            if (!resp.IsSuccessStatusCode) return new(null, null, [], []);
             var html = await resp.Content.ReadAsStringAsync(ct);
-            return new(ParseTitle(html), ParseRevision(html), SlideMediaParser.Parse(html));
+            return new(ParseTitle(html), ParseRevision(html), SlideMediaParser.Parse(html), SlideMediaParser.PageIds(html));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -297,7 +538,7 @@ public static partial class PresentationLoader
         }
         catch
         {
-            return new(null, null, []);
+            return new(null, null, [], []);
         }
     }
 
@@ -335,7 +576,7 @@ public static partial class PresentationLoader
         }
     }
 
-    private static List<SlideNotes> ParsePptxNotes(byte[] pptx)
+    internal static List<PptxSlide> ParsePptxNotes(byte[] pptx)
     {
         using var zip = new ZipArchive(new MemoryStream(pptx), ZipArchiveMode.Read);
 
@@ -343,7 +584,7 @@ public static partial class PresentationLoader
             ?? throw new InvalidOperationException("Invalid PPTX export (missing presentation.xml).");
         var presRels = LoadRels(zip, "ppt/presentation.xml");
 
-        var result = new List<SlideNotes>();
+        var result = new List<PptxSlide>();
         var slideIds = presentation.Root?.Element(P + "sldIdLst")?.Elements(P + "sldId") ?? [];
         foreach (var sldId in slideIds)
         {
@@ -353,38 +594,41 @@ public static partial class PresentationLoader
             var slide = LoadXml(zip, slidePath);
             var hidden = (string?)slide?.Root?.Attribute("show") is "0" or "false";
 
-            var notes = "";
+            var notes = NoteText.Empty;
             var notesPath = LoadRels(zip, slidePath)
                 .Values.FirstOrDefault(p => p.Contains("notesSlides/", StringComparison.OrdinalIgnoreCase));
             if (notesPath != null && LoadXml(zip, notesPath) is { } notesXml)
                 notes = ExtractNotesText(notesXml);
 
-            result.Add(new SlideNotes(hidden, notes));
+            result.Add(new PptxSlide(hidden, notes));
         }
         return result;
     }
 
-    private static string ExtractNotesText(XDocument notesXml)
+    internal static NoteText ExtractNotesText(XDocument notesXml)
     {
         // The speaker notes live in the shape whose placeholder type is "body".
         var bodyShape = notesXml.Descendants(P + "sp").FirstOrDefault(sp =>
             (string?)sp.Element(P + "nvSpPr")?.Element(P + "nvPr")?.Element(P + "ph")?.Attribute("type") == "body");
         var txBody = bodyShape?.Element(P + "txBody");
-        if (txBody == null) return "";
+        if (txBody == null) return NoteText.Empty;
 
-        var sb = new StringBuilder();
+        var text = new NoteText.Builder();
         foreach (var para in txBody.Elements(A + "p"))
         {
-            if (sb.Length > 0) sb.Append('\n');
+            if (!text.IsEmpty) text.Append("\n");
             foreach (var node in para.Elements())
             {
                 if (node.Name == A + "r" || node.Name == A + "fld")
-                    sb.Append((string?)node.Element(A + "t"));
+                    text.Append((string?)node.Element(A + "t"), IsOn(node, "b"), IsOn(node, "i"));
                 else if (node.Name == A + "br")
-                    sb.Append('\n');
+                    text.Append("\n");
             }
         }
-        return sb.ToString().Trim();
+        return text.Build();
+
+        static bool IsOn(XElement run, string attribute) =>
+            (string?)run.Element(A + "rPr")?.Attribute(attribute) is "1" or "true";
     }
 
     private static XDocument? LoadXml(ZipArchive zip, string path)

@@ -7,12 +7,14 @@ using Microsoft.Web.WebView2.WinForms;
 namespace GoogleSlidesNdiPresenter;
 
 /// <summary>
-/// The app window: a dark native frame hosting the web UI (served by <see cref="ApiServer"/>)
+/// The app window: a native frame hosting the web UI (served by <see cref="ApiServer"/>)
 /// in WebView2. Also owns the offscreen live player.
 /// </summary>
 public sealed class MainForm : Form
 {
-    private static readonly Color Background = Color.FromArgb(8, 8, 11);
+    private static readonly Color Background = Color.FromArgb(0x22, 0x22, 0x22);
+    private static readonly Color TopBar = Color.FromArgb(0x38, 0x38, 0x38); // the UI's top bar
+    private const int TopEdge = 4; // strip above the UI that resizes the window from the top
 
     private readonly PresentationController _controller;
     private readonly AppSettings _settings;
@@ -21,6 +23,7 @@ public sealed class MainForm : Form
     private readonly GoogleAccount _google;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Background };
     private LivePresenter? _live;
+    private bool _ownFrame = true; // the UI draws the title bar
 
     public MainForm(PresentationController controller, AppSettings settings, ApiServer api, AudioRouter audio, GoogleAccount google)
     {
@@ -32,7 +35,8 @@ public sealed class MainForm : Form
 
         Text = "Google Slides NDI Presenter";
         Icon = AppIcon.Create();
-        BackColor = Background;
+        BackColor = TopBar;
+        Padding = new Padding(0, TopEdge, 0, 0);
         MinimumSize = new Size(940, 620);
         StartPosition = FormStartPosition.Manual;
         RestorePlacement();
@@ -46,8 +50,83 @@ public sealed class MainForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        DarkTitleBar.Apply(Handle, Background);
+        DarkTitleBar.Apply(Handle, TopBar);
+        UpdateFrame();
     }
+
+    // ---- Title bar: the UI's top bar takes its place (drag regions and buttons are in app.css/app.js). ----
+
+    protected override void WndProc(ref Message m)
+    {
+        const int WM_NCCALCSIZE = 0x83, WM_NCHITTEST = 0x84;
+        const int HTNOWHERE = 0, HTCLIENT = 1, HTCAPTION = 2, HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14;
+
+        if (_ownFrame && m.Msg == WM_NCCALCSIZE && m.WParam != IntPtr.Zero)
+        {
+            // Keep Windows' side and bottom borders (resizing, shadow, snapping) but not the caption.
+            var top = Marshal.ReadInt32(m.LParam, 4);
+            base.WndProc(ref m);
+            // A maximised window hangs over the screen edge by the width of its border.
+            if (IsZoomed(Handle)) top += GetSystemMetricsForDpi(33, (uint)DeviceDpi) + GetSystemMetricsForDpi(92, (uint)DeviceDpi);
+            Marshal.WriteInt32(m.LParam, 4, top);
+            m.Result = IntPtr.Zero;
+            return;
+        }
+
+        base.WndProc(ref m);
+
+        if (_ownFrame && m.Msg == WM_NCHITTEST && (int)m.Result is HTNOWHERE or HTCLIENT or HTCAPTION && Padding.Top > 0)
+        {
+            var p = PointToClient(new Point(unchecked((short)(long)m.LParam), unchecked((short)((long)m.LParam >> 16))));
+            if (p.Y < Padding.Top) m.Result = p.X < 12 ? HTTOPLEFT : p.X >= ClientSize.Width - 12 ? HTTOPRIGHT : HTTOP;
+        }
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        if (!_ownFrame || WindowState == FormWindowState.Minimized) return;
+        var top = WindowState == FormWindowState.Maximized ? 0 : TopEdge;
+        if (Padding.Top != top) Padding = new Padding(0, top, 0, 0);
+        ReportWindowState();
+    }
+
+    private void ReportWindowState()
+    {
+        if (_web.CoreWebView2 is { } core)
+            core.PostWebMessageAsString(WindowState == FormWindowState.Maximized ? "window:maximized" : "window:normal");
+    }
+
+    private void OnUiMessage(string message)
+    {
+        switch (message)
+        {
+            case "window:minimize": WindowState = FormWindowState.Minimized; break;
+            case "window:maximize": WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; break;
+            case "window:close": Close(); break;
+            case "window:ready": ReportWindowState(); break;
+        }
+    }
+
+    /// <summary>Goes back to the normal Windows title bar, for when the UI can't be shown.</summary>
+    private void UseSystemFrame()
+    {
+        _ownFrame = false;
+        Padding = Padding.Empty;
+        UpdateFrame();
+    }
+
+    private void UpdateFrame() =>
+        SetWindowPos(Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020); // no size/move/z-order/activate, frame changed
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsZoomed(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetricsForDpi(int index, uint dpi);
 
     private async Task StartAsync()
     {
@@ -60,6 +139,7 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            UseSystemFrame();
             MessageBox.Show(this,
                 "The app window needs the Microsoft Edge WebView2 Runtime.\n\n" +
                 "The controls will open in your web browser instead. Install WebView2 from microsoft.com/edge/webview2 to fix this.\n\n" + ex.Message,
@@ -78,7 +158,7 @@ public sealed class MainForm : Form
 
         try
         {
-            _live = await LivePresenter.CreateAsync(_settings.Width, _settings.Height);
+            _live = await LivePresenter.CreateAsync(_controller.OutputSize.Width, _controller.OutputSize.Height);
             _controller.AttachLive(_live);
             _live.AudioCaptured += _audio.Feed;
         }
@@ -103,6 +183,7 @@ public sealed class MainForm : Form
         s.IsStatusBarEnabled = false;
         s.IsSwipeNavigationEnabled = false;
         s.AreDevToolsEnabled = Debugger.IsAttached;
+        s.IsNonClientRegionSupportEnabled = true; // the top bar drags the window
 
         // Only text fields get a context menu (cut/copy/paste); no "Back / Reload / Inspect".
         core.ContextMenuRequested += (_, e) =>
@@ -111,6 +192,20 @@ public sealed class MainForm : Form
         };
 
         var origin = new Uri(_api.LocalUrl).GetLeftPart(UriPartial.Authority);
+
+        core.WebMessageReceived += (_, e) =>
+        {
+            if (!e.Source.StartsWith(origin, StringComparison.OrdinalIgnoreCase)) return;
+            string message;
+            try { message = e.TryGetWebMessageAsString(); }
+            catch (ArgumentException) { return; } // not a string
+            OnUiMessage(message);
+        };
+        core.NavigationCompleted += (_, e) =>
+        {
+            // Links opened in the browser instead are cancelled here, which isn't a failure.
+            if (!e.IsSuccess && _ownFrame && e.WebErrorStatus != CoreWebView2WebErrorStatus.OperationCanceled) UseSystemFrame();
+        };
 
         // Links such as "Edit in Slides" open in the default browser.
         core.NewWindowRequested += (_, e) =>
@@ -207,7 +302,7 @@ internal static class AppIcon
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using var path = RoundedRect(new RectangleF(0, 0, 64, 64), 15);
-            using var bg = new LinearGradientBrush(new Point(0, 0), new Point(64, 64), Color.FromArgb(155, 140, 255), Color.FromArgb(91, 69, 240));
+            using var bg = new LinearGradientBrush(new Point(0, 0), new Point(64, 64), Color.FromArgb(0x7a, 0xb4, 0xf7), Color.FromArgb(0x0e, 0x72, 0xed));
             g.FillPath(bg, path);
             using var pen = new Pen(Color.White, 3.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
             using var screen = RoundedRect(new RectangleF(13, 16, 38, 25), 4);

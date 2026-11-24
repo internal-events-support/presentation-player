@@ -21,7 +21,7 @@ For Google Slides, the simplest setup is a deck shared as "Anyone with the link 
 
 ## Download
 
-Grab `PresentationPlayer-<version>-win-x64.exe` from the [Releases](https://github.com/internal-events-support/google-slides-ndi-presenter/releases) page. It's a single file with everything bundled, so there's nothing to install beyond the NDI and WebView2 runtimes above. Windows SmartScreen may warn you the first time because the exe isn't code-signed.
+Grab `PresentationPlayer-<version>-win-x64.exe` from the [Releases](https://github.com/internal-events-support/presentation-player/releases) page. It's a single file with everything bundled, so there's nothing to install beyond the NDI and WebView2 runtimes above. Windows SmartScreen may warn you the first time because the exe isn't code-signed.
 
 ## Building and running
 

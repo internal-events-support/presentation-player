@@ -39,24 +39,34 @@ internal static class PptxConverter
                 await from.CopyToAsync(to, ct);
 
             string? error = null;
-            foreach (var engine in new Func<string, string, int, int, CancellationToken, Task<string?>>[] { PowerPointAsync, LibreOfficeAsync })
+            try
             {
-                try
+                foreach (var engine in new Func<string, string, int, int, CancellationToken, Task<string?>>[] { PowerPointAsync, LibreOfficeAsync })
                 {
-                    if (await engine(copy, folder, width, height, ct) is not { } made) continue; // not installed
-                    File.Delete(copy);
-                    File.WriteAllText(done, Path.GetFileName(made));
-                    Prune();
-                    return made;
+                    try
+                    {
+                        if (await engine(copy, folder, width, height, ct) is not { } made) continue; // not installed
+                        File.Delete(copy);
+                        File.WriteAllText(done, Path.GetFileName(made));
+                        Prune();
+                        return made;
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        error = ex.Message;
+                    }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    error = ex.Message;
-                }
+                throw new InvalidOperationException(error != null
+                    ? "This PowerPoint file couldn't be converted. " + error
+                    : "Opening PowerPoint files needs PowerPoint or LibreOffice on this computer, to draw the slides. LibreOffice is free, from libreoffice.org. Or save the presentation as a PDF and open that.");
             }
-            throw new InvalidOperationException(error != null
-                ? "This PowerPoint file couldn't be converted. " + error
-                : "Opening PowerPoint files needs PowerPoint or LibreOffice on this computer, to draw the slides. LibreOffice is free, from libreoffice.org. Or save the presentation as a PDF and open that.");
+            catch
+            {
+                // Nothing to keep, least of all the copy.
+                try { Directory.Delete(folder, true); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* next time */ }
+                throw;
+            }
         }
         finally
         {

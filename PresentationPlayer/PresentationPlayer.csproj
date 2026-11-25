@@ -12,7 +12,7 @@
     <RootNamespace>PresentationPlayer</RootNamespace>
     <AssemblyName>PresentationPlayer</AssemblyName>
     <!-- Release builds override this from the git tag (see .github/workflows/release.yml). -->
-    <Version>2.1.0</Version>
+    <Version>2.2.0</Version>
     <Product>Presentation Player</Product>
     <Title>Presentation Player</Title>
     <AssemblyTitle>Presentation Player</AssemblyTitle>

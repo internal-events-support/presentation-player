@@ -42,6 +42,7 @@ public sealed record PresentationState(
     IReadOnlyList<int> Skipped,         // numbers of the slides that are skipped (hidden)
     IReadOnlyList<ShowPart> Parts,      // the decks the show is made of, and where each starts
     IReadOnlyList<int> MissingPictures, // numbers of the slides whose picture hasn't arrived yet
+    IReadOnlyList<int> OldPictures,     // and of those with one from before the deck was edited
     bool GoogleExpired,                 // Google has ended the session: sign in again
     string NextPreview,                 // width of the next slide in the presenter view: full or half
     IReadOnlyList<MasterDeck> MasterDecks,
@@ -106,11 +107,12 @@ public sealed class PresentationController : IDisposable
     private bool _googleExpired;
     private CancellationTokenSource? _pictures;
     private long _pictureNews;
+    private (LoadedShow Show, int From, int To)? _lookingAt;
     private TaskCompletionSource? _liveReady; // waiting for the player to show the deck being opened
     // Revisions of the decks in the show: as loaded, and the newest seen since.
     private readonly Dictionary<string, (long? Loaded, long? Latest)> _revisions = new();
     private CancellationTokenSource? _revisionPoll;
-    private readonly Dictionary<(int Index, int Width), byte[]> _thumbCache = new();
+    private readonly Dictionary<(int Index, int Width, bool Old), byte[]> _thumbCache = new();
 
     public event Action? StateChanged;
 
@@ -232,13 +234,32 @@ public sealed class PresentationController : IDisposable
                 current?.Slide.PageId,
                 _show?.Strip.Where(s => s.Slide.Skipped).Select(s => s.Number).ToList() ?? [],
                 _show?.Parts ?? [],
-                _show?.Strip.Select((s, i) => (s, i)).Where(x => x.s.Slide.Picture.Quality < PictureQuality.Preview).Select(x => x.i + 1).ToList() ?? [],
+                PicturesLocked(PictureQuality.None),
+                PicturesLocked(PictureQuality.Old),
                 _googleExpired,
                 _settings.NextPreview,
                 _settings.MasterDecks.ToList(),
                 Displays?.List() ?? [],
                 Displays?.Status(OutputKind.Slides),
                 Displays?.Status(OutputKind.Notes));
+        }
+    }
+
+    private List<int> PicturesLocked(PictureQuality quality) =>
+        _show?.Strip.Select((s, i) => (s, i)).Where(x => x.s.Slide.Picture.Quality == quality).Select(x => x.i + 1).ToList() ?? [];
+
+    /// <summary>Someone is looking at these slides in the strip (numbers from 1), so their pictures come first.</summary>
+    public void LookAt(int from, int to)
+    {
+        lock (_lock) _lookingAt = _show == null ? null : (_show, from, to);
+    }
+
+    private IReadOnlySet<SlidePicture> LookingAt(LoadedShow show)
+    {
+        lock (_lock)
+        {
+            return _lookingAt is var (at, from, to) && at == show && to >= from
+                ? show.Strip.Where(s => s.Number >= from && s.Number <= to).Select(s => s.Slide.Picture).ToHashSet() : new HashSet<SlidePicture>();
         }
     }
 
@@ -259,25 +280,28 @@ public sealed class PresentationController : IDisposable
         OnChanged();
     }
 
-    /// <summary>JPEG thumbnail of a slide by its number (1-based), or null if it has none (yet).</summary>
-    public byte[]? GetSlideThumbnail(int place, int width)
+    /// <summary>JPEG thumbnail of a slide by its number (1-based), or null if it has none (yet). Old if it's from before the deck was edited.</summary>
+    public (byte[]? Jpeg, bool Old) GetSlideThumbnail(int place, int width)
     {
         byte[]? png;
-        var key = (place - 1, Math.Clamp(width, 64, 1920));
+        LoadedShow show;
+        (int, int, bool) key;
         lock (_lock)
         {
-            if (_show == null || place < 1 || place > _show.Strip.Count) return null;
-            if (_thumbCache.TryGetValue(key, out var cached)) return cached;
-            var picture = _show.Strip[place - 1].Slide.Picture;
-            png = picture.Quality >= PictureQuality.Preview ? picture.Data : null;
+            if (_show == null || place < 1 || place > _show.Strip.Count) return (null, false);
+            show = _show;
+            var (data, quality) = show.Strip[place - 1].Slide.Picture.Get();
+            png = data;
+            key = (place - 1, Math.Clamp(width, 64, 1920), quality == PictureQuality.Old);
+            if (_thumbCache.TryGetValue(key, out var cached)) return (cached, key.Item3);
         }
-        if (png == null) return null;
+        if (png == null) return (null, false);
 
         using var full = FrameRenderer.RenderSlide(png, _width, _height);
         using var thumb = FrameRenderer.Thumbnail(full, key.Item2);
         var jpeg = FrameRenderer.EncodeJpeg(thumb, 85);
-        lock (_lock) _thumbCache[key] = jpeg;
-        return jpeg;
+        lock (_lock) if (_show == show) _thumbCache[key] = jpeg;
+        return (jpeg, key.Item3);
     }
 
     /// <summary>Closes the open presentation: both outputs go to the holding scene.</summary>
@@ -843,7 +867,7 @@ public sealed class PresentationController : IDisposable
                 try
                 {
                     await gate.WaitAsync(cts.Token);
-                    try { await PresentationLoader.LoadPicturesAsync(deck, _width, _height, () => PlaceIn(show, deck), () => PictureArrived(show), cts.Token); }
+                    try { await PresentationLoader.LoadPicturesAsync(deck, _width, _height, () => PlaceIn(show, deck), () => LookingAt(show), () => PictureArrived(show), cts.Token); }
                     finally { gate.Release(); }
                 }
                 catch (Exception) { /* closed, or no pictures to be had; the live slides don't need them */ }

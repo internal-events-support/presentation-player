@@ -216,11 +216,14 @@ public sealed partial class ApiServer : IAsyncDisposable
         app.MapGet("/api/stream/{which}", (HttpContext ctx, string which, int? w) => StreamMjpegAsync(ctx, controller, which, w));
         app.MapGet("/api/slides/{n:int}.jpg", (HttpContext ctx, int n, int? w) =>
         {
-            var jpeg = controller.GetSlideThumbnail(n, w ?? 320);
+            var (jpeg, old) = controller.GetSlideThumbnail(n, w ?? 320);
             if (jpeg == null) return Results.NotFound();
-            ctx.Response.Headers.CacheControl = "public, max-age=31536000, immutable"; // URLs carry ?v=<version>
+            // URLs carry ?v=<version>. One from before the deck was edited will be replaced.
+            ctx.Response.Headers.CacheControl = old ? "no-store" : "public, max-age=31536000, immutable";
             return Results.Bytes(jpeg, "image/jpeg");
         });
+        // Which slides are in view in the strip: their pictures are fetched first.
+        app.MapPost("/api/strip/looking", (int from, int to) => { controller.LookAt(from, to); return Results.NoContent(); });
 
         // ---- Master decks ----
         app.MapGet("/api/masters", () => Results.Json(controller.GetState().MasterDecks, Json));

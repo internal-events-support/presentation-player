@@ -49,6 +49,11 @@ public sealed class SlidePicture
     public byte[]? Data { get; private set; }
     public PictureQuality Quality { get; private set; }
 
+    public (byte[]? Data, PictureQuality Quality) Get()
+    {
+        lock (_lock) return (Data, Quality);
+    }
+
     /// <summary>Uses a picture unless there's already a better one.</summary>
     public bool Offer(byte[]? data, PictureQuality quality)
     {

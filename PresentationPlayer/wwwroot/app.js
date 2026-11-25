@@ -80,7 +80,7 @@
   }
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-  const thumbUrl = (n, w) => `/api/slides/${n}.jpg?w=${w}&id=${state ? state.presentationId : ''}&v=${state ? state.version : 0}`;
+  const thumbUrl = (n, w) => `/api/slides/${n}.jpg?w=${w}&id=${state ? state.presentationId : ''}&v=${state ? state.version : 0}${state && (state.oldPictures || []).includes(n) ? '&old=1' : ''}`;
 
   // The path of a file on the computer running the app. "Copy as path" puts quotes around it.
   function parsePath(text) {
@@ -170,7 +170,7 @@
     $('#ndiWarn').title = s.ndiError || '';
 
     // Recents
-    const recentKey = JSON.stringify([s.recent, s.masterDecks, s.presentationId, s.version, s.thumbnailCount > 0, s.outOfDate, s.loading, (s.missingPictures || []).includes(1)]);
+    const recentKey = JSON.stringify([s.recent, s.masterDecks, s.presentationId, s.version, s.thumbnailCount > 0, s.outOfDate, s.loading, (s.missingPictures || []).includes(1), (s.oldPictures || []).includes(1)]);
     if (recentKey !== lastRecentKey) { lastRecentKey = recentKey; renderRecents(); }
 
     // Filmstrip & progress
@@ -710,9 +710,37 @@
   // Pictures arrive after the deck has opened, nearest slides first.
   function fillPictures() {
     const missing = new Set(state.missingPictures || []);
-    for (const img of document.querySelectorAll('#filmstrip img[data-place]:not([src])'))
-      if (!missing.has(+img.dataset.place)) img.src = thumbUrl(+img.dataset.place, 640);
+    const old = new Set(state.oldPictures || []);
+    for (const img of document.querySelectorAll('#filmstrip img[data-place]')) {
+      // Pictures from before an edit are shown until the new ones arrive.
+      const n = +img.dataset.place, have = missing.has(n) ? '' : old.has(n) ? 'old' : 'new';
+      if (!have || img.dataset.have === have) continue;
+      img.dataset.have = have;
+      img.src = thumbUrl(n, 640);
+    }
+    reportLooking();
   }
+
+  // Tells the app which slides are in view, to get their pictures first.
+  let lookingTimer, lookedAt = '';
+  function reportLooking() {
+    clearTimeout(lookingTimer);
+    if (!state || !((state.missingPictures || []).length + (state.oldPictures || []).length)) return;
+    lookingTimer = setTimeout(() => {
+      const strip = $('#filmstrip'), thumbs = strip.children;
+      if (!thumbs.length || !strip.clientWidth) return;
+      // They're all the same width.
+      const first = thumbs[0].getBoundingClientRect(), last = thumbs[thumbs.length - 1].getBoundingClientRect(), box = strip.getBoundingClientRect();
+      const step = thumbs.length > 1 ? (last.left - first.left) / (thumbs.length - 1) : first.width || 1;
+      const from = Math.max(1, Math.floor((box.left - first.left) / step) + 1);
+      const to = Math.min(thumbs.length, Math.floor((box.right - first.left) / step) + 2);
+      const key = `${state.version} ${from} ${to}`;
+      if (key === lookedAt) return;
+      lookedAt = key;
+      api(`/api/strip/looking?from=${from}&to=${to}`).catch(() => { lookedAt = ''; });
+    }, 100);
+  }
+  $('#filmstrip').addEventListener('scroll', reportLooking, { passive: true });
 
   function updateCurrentSlide() {
     const cur = state.slide;

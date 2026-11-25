@@ -152,6 +152,7 @@ public sealed partial class GoogleAccount(AppSettings settings) : PresentationLo
     {
         settings.GoogleEmail = "";
         settings.Save();
+        PictureStore.Clear();
         await ClearSessionAsync();
         await RefreshStatusAsync();
         return (string?)null;

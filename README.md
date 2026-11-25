@@ -197,7 +197,9 @@ There's no password on the API. If you're on a network you don't trust, turn off
 
 The slides feed is Google's own embedded Slides player running in a hidden browser (WebView2). The app records its screen with the Chrome DevTools screencast API and sends each frame over NDI. That's why animations and video look the same as they do in Slides.
 
-The list of slides, the speaker notes and which slides are skipped come from the page of Google's player, so a deck opens in about a second. The slide pictures follow: the ones around the current slide first, at a lower resolution, then all of them from Google's PDF export, which takes Google several seconds to make. Pictures of the last few decks are kept in memory, so going back to one that hasn't changed is quicker.
+The list of slides, the speaker notes and which slides are skipped come from the page of Google's player, so a deck opens in about a second. The slide pictures follow: the ones around the current slide first, then those in view in the strip, then the rest. They're drawn in a hidden browser from the vector drawings of the slides that are also in the player's page, so a few hundred slides take around 20 seconds. Pictures at full resolution come from Google's PDF export, which takes Google up to a minute to make for a deck that size. A slide that can't be drawn uses Google's own preview of it, but Google only allows a few of those at a time.
+
+The drawn pictures of the last dozen decks are kept in `%LOCALAPPDATA%\PresentationPlayer\Pictures`, so opening one that hasn't changed shows them straight away, even after a restart. If it has been edited the old pictures stay until the new ones are ready. They're only used once Google has let the deck be opened, and signing out of Google in the app deletes them.
 
 Google keeps a revision number for every deck that goes up each time it's edited. While a deck is open, the app reads it from the deck's page every 30 seconds, and if it's higher than when you opened or refreshed the deck, the deck is out of date.
 

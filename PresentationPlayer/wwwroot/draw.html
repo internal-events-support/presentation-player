@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<script>
+  // Draws slides for SlideDrawer.cs. A drawing is only ever used as an image, so nothing in it can run.
+  'use strict';
+  const XLINK = 'http://www.w3.org/1999/xlink', SVG = 'http://www.w3.org/2000/svg';
+
+  // Logos and backgrounds are on a lot of slides.
+  const images = new Map();
+  function imageData(url) {
+    let found = images.get(url);
+    if (!found) {
+      found = fetch(url, { credentials: 'include' }).then(async r => {
+        if (!r.ok) throw new Error(r.status);
+        const blob = await r.blob();
+        if (!blob.type.startsWith('image/')) throw new Error(blob.type);
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      });
+      images.set(url, found);
+      found.catch(() => images.delete(url));
+      if (images.size > 40) images.delete(images.keys().next().value);
+    }
+    return found;
+  }
+
+  async function draw(svg, width) {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    const root = doc.documentElement;
+    if (root.localName !== 'svg') throw new Error('not a drawing');
+    const box = (root.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+    const height = box.length === 4 && box[2] > 0 && box[3] > 0 ? Math.round(width * box[3] / box[2]) : Math.round(width * 9 / 16);
+    if (!(height > 0 && height <= width * 4)) throw new Error('odd size');
+    root.setAttribute('width', width);
+    root.setAttribute('height', height);
+
+    // An SVG used as an image can't fetch anything, so its images go inside it.
+    await Promise.all([...doc.getElementsByTagNameNS(SVG, 'image')].map(async el => {
+      const url = el.getAttributeNS(XLINK, 'href') || el.getAttribute('href') || '';
+      if (url.startsWith('data:')) return;
+      let host = '';
+      try { host = new URL(url).host; } catch { /* no address */ }
+      let data;
+      if (host === 'docs.google.com' || host.endsWith('.googleusercontent.com')) data = await imageData(url);
+      else {
+        // The player's own, such as its audio icon. A slide can do without.
+        data = host === 'ssl.gstatic.com' ? await imageData(url).catch(() => null) : null;
+        if (!data) { el.remove(); return; }
+      }
+      el.removeAttribute('href');
+      el.setAttributeNS(XLINK, 'xlink:href', data);
+    }));
+
+    const address = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(doc)], { type: 'image/svg+xml' }));
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error('could not be drawn'));
+        i.src = address;
+      });
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const g = canvas.getContext('2d', { alpha: false });
+      g.fillStyle = '#fff';
+      g.fillRect(0, 0, width, height);
+      g.drawImage(img, 0, 0, width, height);
+      return canvas.toDataURL('image/jpeg', 0.88).split(',')[1] || null;
+    } finally {
+      URL.revokeObjectURL(address);
+    }
+  }
+
+  const app = window.chrome.webview;
+  app.addEventListener('message', async e => {
+    const { id, svg, width } = e.data;
+    let jpeg = null;
+    try { jpeg = await draw(svg, width); } catch { /* Google's own picture of it is used instead */ }
+    app.postMessage({ id, jpeg });
+  });
+  app.postMessage({ id: 0 });
+</script>

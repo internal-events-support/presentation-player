@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net;
 using System.Text;
@@ -11,10 +12,13 @@ namespace PresentationPlayer;
 /// <summary>
 /// A deck as opened. Slides are all of its slides, including skipped (hidden) ones; their pictures
 /// come later (<see cref="PresentationLoader.LoadPicturesAsync"/>). MediaAccess is Media once it's
-/// known whether each clip can be played.
+/// known whether each clip can be played. Drawings are of the slides that haven't got a picture from one yet.
 /// </summary>
 public sealed record LoadedPresentation(string Id, string Title, IReadOnlyList<DeckSlide> Slides, long? Revision, IReadOnlyList<SlideMedia> Media,
-    Task<IReadOnlyList<SlideMedia>> MediaAccess);
+    Task<IReadOnlyList<SlideMedia>> MediaAccess)
+{
+    public ConcurrentDictionary<string, string> Drawings { get; init; } = new();
+}
 
 /// <summary>What the master deck editor shows about a deck.</summary>
 public sealed record DeckSummary(string Id, string Title, int Slides, IReadOnlyList<int> Skipped);
@@ -100,7 +104,8 @@ public static partial class PresentationLoader
         // The player's page has the slides and notes, the editor's page the title, revision and media.
         // Both are small, so the deck opens quickly; the pictures follow.
         var pageTask = FetchPageInfoAsync(id, ct);
-        var player = await FetchPlayerPagesAsync(id, ct);
+        var playerHtml = await FetchPlayerPageAsync(id, ct);
+        var player = DeckAlignment.ParsePlayerPages(playerHtml);
         var page = await pageTask;
 
         IReadOnlyList<DeckSlide> slides;
@@ -123,8 +128,12 @@ public static partial class PresentationLoader
         }
 
         ReuseCachedPictures(id, page.Revision, slides);
+        PictureStore.Load(id, page.Revision, slides);
         return new LoadedPresentation(id, string.IsNullOrWhiteSpace(title) ? "Untitled presentation" : title, slides, page.Revision, page.Media,
-            CheckMediaAsync(page.Media, ct));
+            CheckMediaAsync(page.Media, ct))
+        {
+            Drawings = slides.All(s => s.Picture.Quality >= PictureQuality.Preview) ? new() : SlideDrawer.ParseDrawings(playerHtml),
+        };
     }
 
     // Pictures of recently opened decks, by deck and revision, so going back to an unchanged deck is instant.
@@ -149,7 +158,7 @@ public static partial class PresentationLoader
     private static void CachePictures(LoadedPresentation deck)
     {
         if (deck.Revision is not { } revision) return;
-        var pictures = deck.Slides.Where(s => s.PageId != null && s.Picture.Quality >= PictureQuality.Preview)
+        var pictures = deck.Slides.Where(s => s.PageId != null && s.Picture.Quality > PictureQuality.None)
             .GroupBy(s => s.PageId!).ToDictionary(g => g.Key, g => g.First().Picture);
         if (pictures.Count == 0) return;
         lock (PictureCache)
@@ -163,12 +172,17 @@ public static partial class PresentationLoader
     // Google only allows a handful of exports of a deck at once ("429 Too Many Requests").
     private const int PreviewWorkers = 2;
     private const int PreviewsAhead = 5;
+    private const int DrawWorkers = 3;
+    private const int DrawWidth = 960;
+    private const int DrawFailures = 5; // in a row: it isn't working
 
     /// <summary>
-    /// Gets the deck's pictures. Google takes a while to make the PDF with all of them, so meanwhile the
-    /// slides next to <paramref name="current"/> are fetched one by one at a lower resolution.
+    /// Gets the deck's pictures. Google takes a while to make the PDF with all of them (the best part of a
+    /// minute for a few hundred slides), so meanwhile they're made from the drawings in the player's page, at
+    /// a lower resolution. Without a drawing, Google's own preview is fetched for the slides that matter most:
+    /// those next to <paramref name="current"/>, and those being looked at in the strip.
     /// </summary>
-    public static async Task LoadPicturesAsync(LoadedPresentation deck, int width, int height, Func<int> current, Action changed, CancellationToken ct)
+    public static async Task LoadPicturesAsync(LoadedPresentation deck, int width, int height, Func<int> current, Func<IReadOnlySet<SlidePicture>> lookingAt, Action changed, CancellationToken ct)
     {
         if (deck.Slides.All(s => s.Picture.Quality == PictureQuality.Full)) return;
         if (LocalDecks.IsLocal(deck.Id))
@@ -176,13 +190,17 @@ public static partial class PresentationLoader
             await LocalDecks.LoadPicturesAsync(deck, current, changed, ct);
             return;
         }
+        var epoch = PictureStore.Epoch;
         var taken = new HashSet<int>();
+        var drawing = new HashSet<int>();
         var pdfFailed = false;
         long quietUntil = 0;
+        var drawFailures = 0;
         using var previews = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         // The PDF is asked for first: it's the one request that brings everything.
         var pdfTask = DownloadAsync($"https://docs.google.com/presentation/d/{deck.Id}/export/pdf", "%PDF"u8.ToArray(), ct, retry: true);
+        var drawTask = Task.WhenAll(Enumerable.Range(0, DrawWorkers).Select(_ => Task.Run(() => DrawAsync(ct), ct)));
         var previewTask = Task.WhenAll(Enumerable.Range(0, PreviewWorkers).Select(_ => PreviewsAsync(previews.Token)));
         try
         {
@@ -205,7 +223,46 @@ public static partial class PresentationLoader
             CachePictures(deck); // even if another deck is being opened before they've all arrived
         }
         try { await previewTask; } catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+        await drawTask;
         CachePictures(deck);
+        if (deck.Slides.All(s => s.Picture.Quality >= PictureQuality.Preview)) PictureStore.Finish(deck.Id, deck.Revision);
+
+        bool Near(int i, int at) => i >= at - 1 && i <= at + PreviewsAhead;
+
+        // What's coming up matters most, then what's being looked at.
+        int Order(int i, int at, IReadOnlySet<SlidePicture> looking) =>
+            (Near(i, at) ? 0 : looking.Contains(deck.Slides[i].Picture) ? 100_000 : 200_000) + (i >= at ? i - at : (at - i) * 3);
+
+        async Task DrawAsync(CancellationToken stop)
+        {
+            while (SlideDrawer.Current is { } drawer)
+            {
+                int place;
+                lock (drawing)
+                {
+                    var at = current();
+                    var looking = lookingAt();
+                    place = Enumerable.Range(0, deck.Slides.Count)
+                        .Where(i => !drawing.Contains(i) && deck.Slides[i].PageId is { } id && deck.Drawings.ContainsKey(id))
+                        .OrderBy(i => Order(i, at, looking)).DefaultIfEmpty(-1).First();
+                    if (place < 0) return;
+                    drawing.Add(place);
+                }
+                var slide = deck.Slides[place];
+                if (!deck.Drawings.TryGetValue(slide.PageId!, out var svg)) continue;
+                var jpeg = slide.Picture.Quality >= PictureQuality.Preview ? null : await drawer.DrawAsync(svg, DrawWidth, stop);
+                var failed = jpeg == null && slide.Picture.Quality < PictureQuality.Preview;
+                if (jpeg != null)
+                {
+                    PictureStore.Save(epoch, deck.Id, deck.Revision, slide.PageId!, jpeg);
+                    if (slide.Picture.Offer(jpeg, PictureQuality.Preview)) changed();
+                }
+                deck.Drawings.TryRemove(slide.PageId!, out _); // if it failed, the previews take it from here
+                if (failed && Interlocked.Increment(ref drawFailures) >= DrawFailures) deck.Drawings.Clear();
+                else if (!failed) Interlocked.Exchange(ref drawFailures, 0);
+            }
+            deck.Drawings.Clear(); // no browser
+        }
 
         async Task PreviewsAsync(CancellationToken stop)
         {
@@ -218,17 +275,18 @@ public static partial class PresentationLoader
                 {
                     finishing = Volatile.Read(ref pdfFailed);
                     var at = current();
+                    var looking = lookingAt();
                     place = Enumerable.Range(0, deck.Slides.Count)
-                        .Where(i => !taken.Contains(i) && deck.Slides[i].PageId != null && deck.Slides[i].Picture.Quality < PictureQuality.Preview)
-                        .Where(i => finishing || (i >= at - 1 && i <= at + PreviewsAhead))
-                        .OrderBy(i => i >= at ? i - at : (at - i) * 3) // what's coming up matters most
+                        .Where(i => !taken.Contains(i) && deck.Slides[i].PageId is { } id && deck.Slides[i].Picture.Quality < PictureQuality.Preview && !deck.Drawings.ContainsKey(id))
+                        .Where(i => finishing || Near(i, at) || looking.Contains(deck.Slides[i].Picture))
+                        .OrderBy(i => Order(i, at, looking))
                         .DefaultIfEmpty(-1).First();
                     if (place >= 0) taken.Add(place);
                 }
                 if (place < 0)
                 {
-                    if (finishing) return;
-                    await Task.Delay(400, stop); // the PDF is on its way; the operator may move on meanwhile
+                    if (finishing && deck.Drawings.IsEmpty) return;
+                    await Task.Delay(400, stop); // the PDF and drawings are on their way; the operator may move on meanwhile
                     continue;
                 }
 
@@ -247,7 +305,9 @@ public static partial class PresentationLoader
                         continue;
                     }
                     if (!resp.IsSuccessStatusCode || resp.Content.Headers.ContentType?.MediaType is not ("image/jpeg" or "image/png")) continue;
-                    if (slide.Picture.Offer(await resp.Content.ReadAsByteArrayAsync(stop), PictureQuality.Preview)) changed();
+                    var picture = await resp.Content.ReadAsByteArrayAsync(stop);
+                    PictureStore.Save(epoch, deck.Id, deck.Revision, slide.PageId!, picture);
+                    if (slide.Picture.Offer(picture, PictureQuality.Preview)) changed();
                 }
                 catch (HttpRequestException) { /* try the next one */ }
                 catch (TaskCanceledException) when (!stop.IsCancellationRequested) { /* timed out */ }
@@ -298,7 +358,7 @@ public static partial class PresentationLoader
         var id = ExtractId(url) ?? throw new ArgumentException("That doesn't look like a Google Slides link.");
         await Cookies.SyncAsync(Google);
         var pageTask = FetchPageInfoAsync(id, ct);
-        var pages = await FetchPlayerPagesAsync(id, ct);
+        var pages = DeckAlignment.ParsePlayerPages(await FetchPlayerPageAsync(id, ct));
         var page = await pageTask;
         var count = pages.Count > 0 ? pages.Count : page.PageIds.Count;
         if (count == 0) throw NoAccess(id);
@@ -509,17 +569,17 @@ public static partial class PresentationLoader
     private sealed record PageInfo(string? Title, long? Revision, IReadOnlyList<SlideMedia> Media, IReadOnlyList<string> PageIds);
 
     /// <summary>
-    /// The slides as Google's player has them, from the data embedded in its page: their ids, how many
-    /// clicks their animations take, and whether something starts by itself. Empty if it can't be read.
+    /// The page of Google's player, whose data has the slides (<see cref="DeckAlignment.ParsePlayerPages"/>) and
+    /// drawings of them (<see cref="SlideDrawer.ParseDrawings"/>). Empty if it can't be read.
     /// </summary>
-    private static async Task<IReadOnlyList<PlayerPage>> FetchPlayerPagesAsync(string id, CancellationToken ct)
+    private static async Task<string> FetchPlayerPageAsync(string id, CancellationToken ct)
     {
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, $"https://docs.google.com/presentation/d/{id}/embed?start=false");
             req.Headers.AcceptLanguage.ParseAdd("en-US");
             using var resp = await Http.SendAsync(req, ct);
-            return resp.IsSuccessStatusCode ? DeckAlignment.ParsePlayerPages(await resp.Content.ReadAsStringAsync(ct)) : [];
+            return resp.IsSuccessStatusCode ? await resp.Content.ReadAsStringAsync(ct) : "";
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -527,7 +587,7 @@ public static partial class PresentationLoader
         }
         catch
         {
-            return [];
+            return "";
         }
     }
 

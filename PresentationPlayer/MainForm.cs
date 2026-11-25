@@ -24,6 +24,7 @@ public sealed class MainForm : Form
     private readonly DisplayOutputs _displays;
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Background };
     private LivePresenter? _live;
+    private SlideDrawer? _drawer;
     private bool _ownFrame = true; // the UI draws the title bar
 
     public MainForm(PresentationController controller, AppSettings settings, ApiServer api, AudioRouter audio, GoogleAccount google, DisplayOutputs displays)
@@ -175,6 +176,7 @@ public sealed class MainForm : Form
             // Without WebView2 there's no Google sign-in; public decks still work.
         }
 
+        SlideDrawer.Current = _drawer = new SlideDrawer(this);
         try
         {
             _live = await LivePresenter.CreateAsync(_controller.OutputSize.Width, _controller.OutputSize.Height);
@@ -299,6 +301,8 @@ public sealed class MainForm : Form
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+        SlideDrawer.Current = null;
+        _drawer?.Dispose();
         _live?.Dispose();
         _web.Dispose();
         base.OnFormClosed(e);

@@ -1,6 +1,7 @@
 name: Release
 
-# Builds the Windows exe and attaches it to the release whenever a release is published.
+# Builds the Windows installer, and the packages installed copies update themselves from, and attaches
+# them to the release whenever a release is published.
 # It can also be run by hand against an existing release tag (e.g. to rebuild an asset).
 on:
   release:
@@ -36,22 +37,64 @@ jobs:
         with:
           dotnet-version: 9.0.x
 
-      - name: Build a single self-contained exe
+      - name: Build the app
         shell: pwsh
         run: >
           dotnet publish PresentationPlayer -c Release -r win-x64 --self-contained
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:EnableCompressionInSingleFile=true
           -p:DebugType=none
           -p:Version=${{ steps.version.outputs.version }}
           -o publish
 
-      - name: Attach the exe to the release
+      # The version before, so that updating from it only downloads what's changed.
+      - name: Get the previous version
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $asset = "PresentationPlayer-${{ steps.version.outputs.version }}-win-x64.exe"
-          Copy-Item publish/PresentationPlayer.exe $asset
-          gh release upload "${{ steps.version.outputs.tag }}" $asset --clobber --repo "${{ github.repository }}"
+          New-Item -ItemType Directory packages | Out-Null
+          $version = [version]'${{ steps.version.outputs.version }}'
+          $releases = gh release list --limit 50 --exclude-drafts --exclude-pre-releases --json tagName --repo '${{ github.repository }}' | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw "Couldn't list the releases" }
+          $previous = $releases.tagName | Where-Object { $_ -match '^v?\d+\.\d+\.\d+$' -and [version]$_.TrimStart('v') -lt $version } |
+            Sort-Object { [version]$_.TrimStart('v') } | Select-Object -Last 1
+          if ($previous) { gh release download $previous --pattern '*-full.nupkg' --dir packages --repo '${{ github.repository }}' }
+          # 2.0.0 and older have no package. Without one, updating downloads the whole app.
+          $global:LASTEXITCODE = 0
+
+      # The id is also the folder it's installed in, under %LOCALAPPDATA%. It can't be PresentationPlayer,
+      # which is where the app keeps its data, and can't change without breaking updates.
+      - name: Build the installer and update packages
+        shell: pwsh
+        run: |
+          dotnet tool restore
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet vpk pack --skip-updates `
+            --packId neriftafu.PresentationPlayer `
+            --packTitle "Presentation Player" `
+            --packAuthors neriftafu `
+            --packVersion "${{ steps.version.outputs.version }}" `
+            --packDir publish `
+            --mainExe PresentationPlayer.exe `
+            --icon PresentationPlayer/app.ico `
+            --framework webview2 `
+            --noPortable `
+            --outputDir packages
+
+      - name: Attach them to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          Move-Item packages/neriftafu.PresentationPlayer-win-Setup.exe PresentationPlayer-Setup.exe
+          # Each release only lists its own packages; the app puts the lists together.
+          $feed = Get-Content packages/releases.win.json -Raw | ConvertFrom-Json
+          $feed.Assets = @($feed.Assets | Where-Object Version -eq $version)
+          if (-not $feed.Assets) { throw "No packages were made for $version" }
+          $feed | ConvertTo-Json -Depth 10 | Set-Content releases.win.json
+          $files = @('PresentationPlayer-Setup.exe') + @($feed.Assets | ForEach-Object { "packages/$($_.FileName)" })
+          # The list goes last: the app looks for updates in it.
+          foreach ($upload in $files, @('releases.win.json')) {
+            gh release upload "${{ steps.version.outputs.tag }}" @upload --clobber --repo "${{ github.repository }}"
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }

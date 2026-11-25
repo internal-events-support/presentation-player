@@ -18,6 +18,7 @@
     <AssemblyTitle>Presentation Player</AssemblyTitle>
     <Company>neriftafu</Company>
     <Copyright>Copyright © 2026 neriftafu</Copyright>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- The WebView2 package also ships its WPF control; this app only uses the WinForms one. -->
     <NoWarn>$(NoWarn);MSB3277</NoWarn>
@@ -36,6 +37,7 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
     <PackageReference Include="NAudio.Asio" Version="2.2.1" />
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
     <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
   </ItemGroup>
 

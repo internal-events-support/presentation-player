@@ -980,6 +980,7 @@
       form.apiPort.value = s.apiPort;
       await fillAudio(form, s);
       await fillGoogle();
+      await fillUpdate();
     } catch { toast('Couldn’t load settings.', 'error'); return; }
     showPane(pane);
     $('#settingsDialog').showModal();
@@ -1120,6 +1121,70 @@
       btn.disabled = false;
       renderGoogle();
     }
+  });
+
+  // ------------------------------------------------------------------ Updates (desktop only)
+
+  let update = null, updateTimer, updateToasted = '';
+  async function fillUpdate() {
+    if (!isDesktop) return;
+    try { update = await api('/api/update', { method: 'GET', privileged: true }); renderUpdate(); }
+    catch { /* shows the last known */ }
+    clearTimeout(updateTimer);
+    updateTimer = setTimeout(fillUpdate, (update && update.activity) || $('#settingsDialog').open ? 1000 : 20000);
+  }
+  function renderUpdate() {
+    const u = update;
+    const when = u.automatic ? 'It’ll be installed when you close the app.' : '';
+    $('#updateReady').hidden = !u.ready;
+    $('#updateVersion').textContent = u.version;
+    $('#updateDownload').hidden = u.supported;
+    $('#updateDownload').href = u.releasesUrl;
+    $('#updateAutoRow').hidden = !u.supported;
+    $('#updateAuto').checked = u.automatic;
+    $('#updateError').textContent = u.lastError || '';
+    const b = $('#updateBtn');
+    b.hidden = !u.supported;
+    b.disabled = !!u.activity;
+    b.textContent = u.ready ? 'Update now' : 'Check for updates';
+    $('#updateStatus').textContent = !u.supported ? 'This copy wasn’t installed, so it can’t update itself.'
+      : u.activity === 'checking' ? 'Checking…'
+      : u.activity === 'downloading' ? `Downloading… ${u.percent}%`
+      : u.ready ? `Version ${u.ready} is ready. ${when}`
+      : u.lastError ? ''
+      : u.lastChecked ? `Up to date, checked ${timeAgo(u.lastChecked)}`
+      : 'Not checked yet';
+    if (u.ready && u.ready !== updateToasted) {
+      updateToasted = u.ready;
+      if (!$('#settingsDialog').open) toast(`Version ${u.ready} is ready. ${when}`, 'info');
+    }
+  }
+  function offerUpdate() {
+    if (!update || !update.ready) return;
+    $('#updateTitle').textContent = `Update to version ${update.ready}?`;
+    $('#updateText').textContent = `The app closes, updates and opens again. The outputs stop for several seconds${
+      state && state.presentationId ? ', and the presentation starts again from its first slide' : ''}.${
+      update.automatic ? ' If you choose Later, it’s installed when you close the app.' : ''}`;
+    $('#updateNotes').href = `${update.releasesUrl}/tag/v${update.ready}`;
+    $('#updateDialog').showModal();
+    $('#updateNow').focus();
+  }
+  $('#updateReady').addEventListener('click', () => { if (!anyDialogOpen()) offerUpdate(); });
+  $('#updateBtn').addEventListener('click', async () => {
+    if (update && update.ready) { closeDialog('#settingsDialog'); offerUpdate(); return; }
+    $('#updateBtn').disabled = true;
+    try { await api('/api/update/check', { privileged: true }); }
+    catch (err) { $('#updateError').textContent = err.message; }
+    fillUpdate();
+  });
+  $('#updateAuto').addEventListener('change', async e => {
+    try { update = await api('/api/update', { method: 'PUT', body: { automatic: e.target.checked }, privileged: true }); renderUpdate(); }
+    catch (err) { $('#updateError').textContent = err.message; }
+  });
+  $('#updateNow').addEventListener('click', async () => {
+    closeDialog('#updateDialog');
+    try { await api('/api/update/install', { privileged: true }); toast('Updating…', 'info'); }
+    catch (err) { toast(err.message, 'error'); }
   });
 
   // ------------------------------------------------------------------ Audio meter
@@ -1309,6 +1374,7 @@
       .every(k => saved[k] === running[k]);
   }).catch(() => {});
   loadInfo();
+  fillUpdate();
   startStreams();
   new MutationObserver(() => { if (app.dataset.view === 'stage') startStreams(); })
     .observe(app, { attributes: true, attributeFilter: ['data-view'] });

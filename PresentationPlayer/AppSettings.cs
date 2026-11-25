@@ -53,6 +53,8 @@ public sealed class AppSettings
     /// <summary>Where the outputs are shown on this computer, besides NDI.</summary>
     public OutputPlacement SlidesOutput { get; set; } = new();
     public OutputPlacement NotesOutput { get; set; } = new();
+    /// <summary>Download new versions in the background and install them when the app closes.</summary>
+    public bool AutoUpdate { get; set; } = true;
     public List<RecentPresentation> Recent { get; set; } = [];
     public List<MasterDeck> MasterDecks { get; set; } = [];
     public WindowPlacement? Window { get; set; }

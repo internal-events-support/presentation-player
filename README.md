@@ -21,7 +21,19 @@ For Google Slides, the simplest setup is a deck shared as "Anyone with the link 
 
 ## Download
 
-Grab `PresentationPlayer-<version>-win-x64.exe` from the [Releases](https://github.com/internal-events-support/presentation-player/releases) page. It's a single file with everything bundled, so there's nothing to install beyond the NDI and WebView2 runtimes above. Windows SmartScreen may warn you the first time because the exe isn't code-signed.
+Download and run [PresentationPlayer-Setup.exe](https://github.com/internal-events-support/presentation-player/releases/latest/download/PresentationPlayer-Setup.exe), also on the [Releases](https://github.com/internal-events-support/presentation-player/releases) page. It installs the app for your Windows account, without needing an administrator, adds it to the Start menu and desktop, and opens it. It also installs the WebView2 runtime if that's missing, but not the NDI one. Windows SmartScreen may warn you because the installer isn't code-signed.
+
+If you have one of the single-file versions (2.0.0 and earlier), close it, run the installer and delete the old exe. Your settings and Google sign-in are kept. Windows may ask about the firewall again.
+
+To remove it, use Settings → Apps in Windows. Settings and the Google sign-in stay on the computer in case you install it again.
+
+### Updates
+
+The app looks for a new version when it starts, and every six hours or so while no presentation is open. It downloads it in the background and installs it when you close the app. It never updates or restarts by itself while it's running, or when it starts, so reopening it during a show gives you the version you had.
+
+When a version is ready an Update button appears in the top bar, to install it straight away: the app closes, updates and opens again, which takes a few seconds. If another copy of the app is running it isn't installed until that's closed too.
+
+Settings → Updates has the version you're running, a button to check now, and a switch to turn automatic updates off. With it off the app only looks when you press the button, and only installs when you press Update.
 
 ## Building and running
 
@@ -201,7 +213,15 @@ NDI reports connections rather than receivers, and each receiver opens two, so t
 
 ## Cutting a release
 
-Bump `<Version>` in `PresentationPlayer.csproj`, then publish a release on GitHub with a tag like `v1.2.0`. The Release workflow builds the exe from that tag (taking the version from the tag) and attaches it to the release a few minutes later. If an asset ever needs rebuilding, run the workflow by hand from the Actions tab and give it the tag.
+Bump `<Version>` in `PresentationPlayer.csproj`, then publish a release on GitHub with a tag like `v1.2.0`. The Release workflow builds that tag (taking the version from the tag) and attaches these a few minutes later:
+
+- `PresentationPlayer-Setup.exe`, the installer.
+- `…-full.nupkg` and `…-delta.nupkg`, what installed copies update from. The delta is only what's changed since the version before.
+- `releases.win.json`, which lists them for the app. Installed copies update once it's there.
+
+Publishing a release sends it to every installed copy. Pre-releases aren't offered as updates. If an asset ever needs rebuilding, run the workflow by hand from the Actions tab and give it the tag.
+
+The installer and updates are made with [Velopack](https://velopack.io). Keep the `Velopack` package and the `vpk` tool (in `.config/dotnet-tools.json`) on the same version. To try an update without publishing, make the packages locally with `dotnet vpk pack`, as the workflow does, and start an installed copy with the environment variable `PRESENTATIONPLAYER_UPDATES` set to their folder.
 
 ## Known limitations
 

@@ -282,8 +282,12 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>The app was closed because Windows is shutting down or signing out.</summary>
+    public bool WindowsEnding { get; private set; }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        WindowsEnding = e.CloseReason == CloseReason.WindowsShutDown;
         var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
         _settings.Window = new WindowPlacement
         {

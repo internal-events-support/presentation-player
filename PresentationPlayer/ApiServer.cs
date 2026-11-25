@@ -52,23 +52,23 @@ public sealed partial class ApiServer : IAsyncDisposable
         Warning = warning;
     }
 
-    public static async Task<ApiServer> StartAsync(PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, DisplayOutputs displays, Func<bool, Task<string[]>> browse, Action requestRestart)
+    public static async Task<ApiServer> StartAsync(PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, DisplayOutputs displays, Func<bool, Task<string[]>> browse, Action requestRestart, Updater updater, Action requestUpdate)
     {
         var host = settings.RemoteAccess ? "0.0.0.0" : "127.0.0.1";
         try
         {
-            return await StartOnAsync(controller, settings, audio, google, displays, browse, requestRestart, $"http://{host}:{settings.ApiPort}", settings.RemoteAccess, null);
+            return await StartOnAsync(controller, settings, audio, google, displays, browse, requestRestart, updater, requestUpdate, $"http://{host}:{settings.ApiPort}", settings.RemoteAccess, null);
         }
         catch (Exception ex) when (ex is IOException or SocketException || ex.InnerException is SocketException)
         {
             // Keep the UI working on a random local port; remote control is unavailable.
-            return await StartOnAsync(controller, settings, audio, google, displays, browse, requestRestart, "http://127.0.0.1:0", false,
+            return await StartOnAsync(controller, settings, audio, google, displays, browse, requestRestart, updater, requestUpdate, "http://127.0.0.1:0", false,
                 $"Port {settings.ApiPort} is already in use, so remote control is off. Pick another port in Settings.");
         }
     }
 
     private static async Task<ApiServer> StartOnAsync(
-        PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, DisplayOutputs displays, Func<bool, Task<string[]>> browse, Action requestRestart,
+        PresentationController controller, AppSettings settings, AudioRouter audio, GoogleAccount google, DisplayOutputs displays, Func<bool, Task<string[]>> browse, Action requestRestart, Updater updater, Action requestUpdate,
         string url, bool remote, string? warning)
     {
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions { ContentRootPath = AppContext.BaseDirectory });
@@ -119,7 +119,7 @@ public sealed partial class ApiServer : IAsyncDisposable
             warning = server.Warning,
             isLocal = ctx.Connection.RemoteIpAddress is { } ip && IPAddress.IsLoopback(ip),
             settingsPath = AppSettings.FilePath,
-            version = Assembly.GetExecutingAssembly().GetName().Version?.ToString(3),
+            version = Updater.Version,
         }, Json));
 
         // ---- Presentation ----
@@ -328,6 +328,29 @@ public sealed partial class ApiServer : IAsyncDisposable
             requestRestart();
             return Results.Ok();
         });
+        app.MapGet("/api/update", (HttpContext ctx) =>
+            Privileged(ctx) ? Results.Json(updater.Status(), Json) : Results.StatusCode(StatusCodes.Status403Forbidden));
+        app.MapPut("/api/update", async (HttpContext ctx) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            var dto = await ctx.Request.ReadFromJsonAsync<UpdateDto>(Json);
+            settings.AutoUpdate = dto?.Automatic ?? settings.AutoUpdate;
+            settings.Save();
+            return Results.Json(updater.Status(), Json);
+        });
+        app.MapPost("/api/update/check", (HttpContext ctx) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            _ = updater.CheckAsync(); // the status shows how it's going
+            return Results.Accepted();
+        });
+        app.MapPost("/api/update/install", (HttpContext ctx) =>
+        {
+            if (!Privileged(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (updater.CantInstall() is { } error) return Results.Json(new { error }, Json, statusCode: StatusCodes.Status409Conflict);
+            requestUpdate();
+            return Results.Ok();
+        });
 
         await app.StartAsync();
         var port = new Uri(app.Urls.First().Replace("0.0.0.0", "127.0.0.1")).Port;
@@ -517,6 +540,7 @@ public sealed partial class ApiServer : IAsyncDisposable
 
     private sealed record LoadRequest(string? Url);
     private sealed record OutputDto(string? Mode, string? Display);
+    private sealed record UpdateDto(bool? Automatic);
     private sealed record PresenterDto(string? NextPreview);
     private sealed record RequestAccessDto(string? Kind, string? Id);
 

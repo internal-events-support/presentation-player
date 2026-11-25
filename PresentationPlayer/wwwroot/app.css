@@ -235,8 +235,8 @@ kbd {
 /* Some audio or video in the deck won't play (e.g. not shared with the signed-in account). */
 .info-btn.has-problem, .info-btn.has-problem:hover:not(:disabled) { color: var(--red); }
 .info-btn.has-problem::after { content: ""; position: absolute; top: 0; right: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 2px var(--toolbar-bg); }
-.chip-warn { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: var(--r-pill); background: rgba(255, 159, 10, .16); color: var(--orange); font-size: var(--fs-xs); font-weight: 600; }
-.chip-warn .ic { width: 13px; height: 13px; }
+/* Looks like the top bar's buttons, but there's nothing to press. */
+.chip-warn.btn-warn, .chip-warn.btn-warn:hover:not(:disabled), .chip-warn.btn-warn:active:not(:disabled) { cursor: default; background: rgba(255, 159, 10, .14); }
 
 /* Minimise / maximise / close, only in the app's own window */
 .win-buttons { display: none; align-self: stretch; margin: 0 -12px 0 4px; }
@@ -557,8 +557,8 @@ kbd {
 
 /* ---------- Responsive (narrow windows and phones as web remote) ---------- */
 @media (max-width: 1280px) {
-  .deck-actions .btn span { display: none; }
-  .deck-actions .btn { width: 30px; padding: 0; }
+  .deck-actions .btn:not(.chip-warn) span { display: none; }
+  .deck-actions .btn:not(.chip-warn) { width: 30px; padding: 0; }
 }
 @media (max-width: 1100px) {
   :root { --sidebar-w: 220px; }

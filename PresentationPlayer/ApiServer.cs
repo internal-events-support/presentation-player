@@ -105,6 +105,7 @@ public sealed partial class ApiServer : IAsyncDisposable
         app.MapGet("/", () => Asset("index.html", "text/html; charset=utf-8"));
         app.MapGet("/app.css", () => Asset("app.css", "text/css; charset=utf-8"));
         app.MapGet("/app.js", () => Asset("app.js", "text/javascript; charset=utf-8"));
+        app.MapGet("/peer-link.js", () => Asset("peer-link.js", "text/javascript; charset=utf-8"));
         app.MapGet("/icon.svg", () => Asset("icon.svg", "image/svg+xml"));
         LocalDecks.Map(app, Asset);
 

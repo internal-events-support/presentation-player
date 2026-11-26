@@ -38,6 +38,14 @@ Google gives every deck a revision number that goes up with each edit. While a d
 
 These play in a page of the app's own that behaves like Google's player. Windows draws the PDF pages. Converted PowerPoint files are kept in `%LOCALAPPDATA%\PresentationPlayer\Converted`.
 
+### Co-presenter clicker
+
+The clicker page is `clicker/index.html`. The Clicker page workflow publishes it to GitHub Pages with a copy of `PresentationPlayer/wwwroot/peer-link.js` next to it, whenever either changes on `main`. The app's copy of that file has to match the published one, because both ends read and write the same codes.
+
+The connection is a WebRTC data channel, set up without a signalling server. The app makes an offer, waits for its addresses, and packs what's needed (ICE username and password, the certificate fingerprint and up to six addresses) into the link after the `#`. The page answers the same way with its reply code. Each side rebuilds the other's session description from the code. The page can send only `next` and `previous`, and the app sends back the slide number.
+
+To try the page locally, serve `clicker/index.html` and `peer-link.js` from the same folder over `http://127.0.0.1`, and swap the start of the app's link for that address.
+
 ## Cutting a release
 
 Bump `<Version>` in `PresentationPlayer.csproj`, then publish a release on GitHub with a tag like `v1.2.0`. The Release workflow builds that tag, taking the version from it, and attaches these a few minutes later:

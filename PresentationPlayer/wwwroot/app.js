@@ -201,6 +201,8 @@
     $('#autoBtn').setAttribute('aria-checked', String(s.notesAutoFit));
     $('#scrollUpBtn').disabled = s.notesScroll <= 0;
     $('#scrollDownBtn').disabled = s.notesScroll >= s.notesMaxScroll - 0.5;
+
+    if (co.connected) coSendPosition();
   }
 
   // ------------------------------------------------------------------ Outputs on this computer's displays
@@ -1213,6 +1215,141 @@
     closeDialog('#updateDialog');
     try { await api('/api/update/install', { privileged: true }); toast('Updating…', 'info'); }
     catch (err) { toast(err.message, 'error'); }
+  });
+
+  // ------------------------------------------------------------------ Co-presenter (desktop only)
+
+  // Someone somewhere else can go to the next and previous slide from a page in their browser, over
+  // a direct connection set up by swapping a link and a reply code (see peer-link.js).
+  const CLICKER_URL = 'https://internal-events-support.github.io/presentation-player/clicker/';
+  const co = { pc: null, channel: null, connected: false, sent: '', connectTimer: 0, making: 0 };
+
+  function coRender() {
+    const reconnecting = co.connected && co.pc.connectionState === 'disconnected';
+    const b = $('#coBtn');
+    b.classList.toggle('btn-live', co.connected && !reconnecting);
+    b.classList.toggle('btn-warn', reconnecting);
+    b.querySelector('span').textContent = reconnecting ? 'Co-presenter reconnecting' : co.connected ? 'Co-presenter connected' : 'Co-presenter';
+    $('#coInvite').hidden = co.connected;
+    $('#coConnected').hidden = !co.connected;
+    $('#coDisconnect').hidden = !co.connected;
+    $('#coNew').hidden = co.connected;
+  }
+  function coHint(text, error = false) {
+    $('#coHint').textContent = text;
+    $('#coHint').classList.toggle('is-error', error);
+  }
+
+  // Ends the connection. A co-presenter being disconnected on purpose is told so.
+  function coEnd(sayBye) {
+    const { pc, channel } = co;
+    clearTimeout(co.connectTimer);
+    Object.assign(co, { pc: null, channel: null, connected: false, sent: '' });
+    if (channel) { channel.onclose = null; channel.onmessage = null; }
+    if (sayBye && channel && channel.readyState === 'open') {
+      try { channel.send(JSON.stringify({ bye: true })); } catch { /* already going */ }
+    }
+    if (pc) setTimeout(() => pc.close(), sayBye ? 400 : 0); // lets the goodbye go out
+    coRender();
+  }
+
+  function coLost(pc) {
+    if (pc !== co.pc) return;
+    const was = co.connected;
+    coEnd(false);
+    toast(was ? 'Your co-presenter’s connection was lost. Send them a new link to reconnect.'
+      : 'Couldn’t connect to your co-presenter. Check their code was for the latest link. If it was, one of the networks may be blocking direct connections.', 'error');
+    if ($('#coDialog').open) coInvite();
+  }
+
+  function coSendPosition(force) {
+    if (!co.connected || co.channel.readyState !== 'open') return;
+    const m = JSON.stringify({ slide: state && state.slideCount ? state.slide : 0, count: (state && state.slideCount) || 0 });
+    if (force || m !== co.sent) { co.sent = m; co.channel.send(m); }
+  }
+
+  async function coInvite() {
+    coEnd(false);
+    const making = ++co.making;
+    $('#coLink').value = '';
+    $('#coLink').placeholder = 'Making a link…';
+    $('#coReply').value = '';
+    coHint('');
+    $('#coCopy').disabled = $('#coConnect').disabled = true;
+    let link;
+    try { link = await PeerLink.invite(); }
+    catch (err) { if (making === co.making) { coHint(err.message || 'A link couldn’t be made.', true); $('#coLink').placeholder = ''; } return; }
+    if (making !== co.making) { link.pc.close(); return; } // another one was started meanwhile
+    const { pc, channel } = link;
+    Object.assign(co, { pc, channel });
+    channel.onopen = () => {
+      if (pc !== co.pc) return;
+      clearTimeout(co.connectTimer);
+      co.connected = true;
+      coSendPosition(true);
+      coRender();
+      closeDialog('#coDialog');
+      toast('Your co-presenter is connected.', 'ok');
+    };
+    channel.onmessage = e => {
+      if (pc !== co.pc || !state || !state.slideCount) return;
+      let m;
+      try { m = JSON.parse(e.data); } catch { return; }
+      // They can only go forward and back.
+      if (m.do === 'next') api('/api/next').catch(() => {});
+      else if (m.do === 'previous') api('/api/previous').catch(() => {});
+    };
+    channel.onclose = () => coLost(pc);
+    pc.onconnectionstatechange = () => {
+      if (pc !== co.pc) return;
+      if (pc.connectionState === 'failed') coLost(pc);
+      else coRender();
+    };
+    $('#coLink').value = `${CLICKER_URL}#${link.code}`;
+    $('#coCopy').disabled = $('#coConnect').disabled = false;
+    coRender();
+  }
+
+  $('#coBtn').hidden = !isDesktop;
+  $('#coBtn').addEventListener('click', () => {
+    if (anyDialogOpen()) return;
+    closeMenu();
+    if (!co.pc) coInvite();
+    coRender();
+    $('#coDialog').showModal();
+    if (!co.connected) $(co.pc ? '#coReply' : '#coCopy').focus();
+  });
+  $('#coCopy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText($('#coLink').value);
+      coHint('Link copied. Send it to your co-presenter, in the Zoom chat for example.');
+    } catch {
+      $('#coLink').select();
+      coHint('Copy the link above and send it to your co-presenter.');
+    }
+    $('#coReply').focus();
+  });
+  $('#coLink').addEventListener('focus', e => e.target.select());
+  $('#coNew').addEventListener('click', () => coInvite());
+  $('#coDisconnect').addEventListener('click', () => {
+    coEnd(true);
+    closeDialog('#coDialog');
+    toast('Your co-presenter was disconnected.', 'info');
+  });
+  $('#coForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const pc = co.pc, reply = $('#coReply').value.trim();
+    if (!pc || co.connected) return;
+    if (!reply) { coHint('Paste the code your co-presenter sends back.', true); return; }
+    if (pc.signalingState !== 'have-local-offer') { coHint('This link has already been used. Press New link, and send them that one.', true); return; }
+    try { await PeerLink.accept(pc, reply); }
+    catch (err) { coHint(err.message, true); return; }
+    $('#coConnect').disabled = true;
+    coHint('Connecting…');
+    clearTimeout(co.connectTimer);
+    co.connectTimer = setTimeout(() => {
+      if (pc === co.pc && !co.connected) coLost(pc);
+    }, 20000);
   });
 
   // ------------------------------------------------------------------ Audio meter

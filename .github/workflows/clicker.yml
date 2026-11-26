@@ -1,0 +1,45 @@
+# Publishes the co-presenter clicker page to GitHub Pages:
+# https://internal-events-support.github.io/presentation-player/clicker/
+name: Clicker page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - clicker/**
+      - PresentationPlayer/wwwroot/peer-link.js
+      - .github/workflows/clicker.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}clicker/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Put the page together
+        run: |
+          mkdir -p site/clicker
+          cp clicker/* site/clicker/
+          cp PresentationPlayer/wwwroot/peer-link.js site/clicker/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

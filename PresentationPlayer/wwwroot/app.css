@@ -131,6 +131,8 @@ kbd {
 .btn-pill.btn-icon { width: 30px; padding: 0; }
 .btn-warn { color: var(--orange); border-color: rgba(255, 159, 10, .55); background: rgba(255, 159, 10, .14); }
 .btn-warn:hover:not(:disabled) { background: rgba(255, 159, 10, .24); }
+.btn-live { color: var(--green); border-color: rgba(48, 209, 88, .55); background: rgba(48, 209, 88, .14); }
+.btn-live:hover:not(:disabled) { background: rgba(48, 209, 88, .24); }
 .btn .kbd-hint { margin-left: auto; background: rgba(255, 255, 255, .18); color: rgba(255, 255, 255, .9); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -488,6 +490,18 @@ kbd {
 .remote-off { margin: 0; font-size: var(--fs-sm); color: var(--text-2); }
 
 /* Master deck editor */
+/* Co-presenter */
+.co-card { width: 500px; background: var(--window-bg); }
+.co-body { display: flex; flex-direction: column; gap: 14px; padding: 14px 16px 16px; }
+.co-body p { margin: 0; color: var(--text-2); font-size: var(--fs-sm); }
+.co-body .field-hint.is-error { color: var(--red); font-weight: 600; }
+.co-step { display: flex; flex-direction: column; gap: 7px; }
+.co-step strong { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.co-num { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--control); font-size: var(--fs-xs); }
+.co-row { display: flex; gap: 8px; }
+.co-row .btn { height: 28px; min-width: 84px; }
+.co-code { flex: 1; min-width: 0; height: 28px; font: var(--fs-sm) var(--mono); }
+
 .master-card { width: 780px; max-height: calc(100vh - 48px); background: var(--window-bg); }
 .master-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 14px; }
 .master-name { display: flex; align-items: center; gap: 10px; }

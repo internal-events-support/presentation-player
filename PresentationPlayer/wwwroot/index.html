@@ -36,6 +36,7 @@
       <symbol id="i-fit" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></symbol>
       <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
       <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+      <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
       <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
       <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/></symbol>
@@ -95,6 +96,9 @@
             <svg class="ic"><use href="#i-external"/></svg><span>Edit in Slides</span>
           </a>
         </div>
+        <button class="btn btn-pill" id="coBtn" type="button" title="Let a co-presenter change slides from their own browser" hidden>
+          <svg class="ic"><use href="#i-users"/></svg><span>Co-presenter</span>
+        </button>
         <button class="btn btn-pill" id="settingsBtn" type="button" title="Settings (Ctrl ,)" hidden>
           <svg class="ic"><use href="#i-gear"/></svg><span>Settings</span>
         </button>
@@ -539,10 +543,48 @@
     </form>
   </dialog>
 
+  <!-- ============ Co-presenter ============ -->
+  <dialog class="modal" id="coDialog">
+    <form method="dialog" class="modal-card co-card" id="coForm" autocomplete="off">
+      <header class="modal-head">
+        <h2>Co-presenter</h2>
+        <button class="btn btn-plain btn-icon" type="button" data-close aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button>
+      </header>
+      <div class="co-body" id="coInvite">
+        <p>Someone who isn’t in the room, such as a speaker joining on Zoom, can go to the next and previous slide from a page in their browser.</p>
+        <div class="co-step">
+          <strong><span class="co-num">1</span>Send them this link</strong>
+          <div class="co-row">
+            <input class="tf co-code" id="coLink" readonly aria-label="Link for your co-presenter">
+            <button class="btn" type="button" id="coCopy"><svg class="ic"><use href="#i-copy"/></svg>Copy</button>
+          </div>
+        </div>
+        <div class="co-step">
+          <strong><span class="co-num">2</span>Paste the code they send back</strong>
+          <div class="co-row">
+            <input class="tf co-code" id="coReply" spellcheck="false" placeholder="Reply code" aria-label="Reply code from your co-presenter">
+            <button class="btn btn-primary" type="submit" id="coConnect">Connect</button>
+          </div>
+        </div>
+        <p class="field-hint" id="coHint"></p>
+      </div>
+      <div class="co-body" id="coConnected" hidden>
+        <p>Your co-presenter is connected. They can go to the next and previous slide, and see which slide is showing.</p>
+      </div>
+      <footer class="modal-foot s-foot">
+        <button class="btn" type="button" id="coNew" title="Stop the link above working, and make another">New link</button>
+        <button class="btn" type="button" id="coDisconnect" hidden>Disconnect</button>
+        <span class="spacer"></span>
+        <button class="btn" type="button" data-close>Done</button>
+      </footer>
+    </form>
+  </dialog>
+
   <div class="goto-hud" id="gotoHud" hidden>Go to slide <strong id="gotoNum"></strong></div>
   <div class="toasts" id="toasts" aria-live="polite"></div>
   <div class="conn-banner" id="connBanner" hidden>Reconnecting to the presenter…</div>
 
+  <script src="/peer-link.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

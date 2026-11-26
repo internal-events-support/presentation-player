@@ -93,6 +93,18 @@ Open one of the addresses in Settings → Remote control in a browser on the sam
 
 There's no password. If you don't trust the network, turn off "Allow other devices" in the same place.
 
+### Co-presenters
+
+Someone who isn't in the room, such as a speaker joining on Zoom, can move the slides on from [a page in their browser](https://internal-events-support.github.io/presentation-player/clicker/). It only has Next and Previous, and shows which slide is up.
+
+1. Press Co-presenter in the top bar and send them the link, in the Zoom chat for example.
+2. They open it and send back the code it shows.
+3. Paste that into the app and press Connect.
+
+The top bar then says Co-presenter connected, and you can disconnect them from there. The page works with the arrow keys and most USB clickers while it's in front.
+
+Their browser connects straight to the app. Only Google's STUN service is used, to find each side's public address, and it never sees a click. Some strict networks block direct connections, so try it on the venue's network before the show. If the connection drops, send them a new link.
+
 ## Master decks
 
 A master deck plays several presentations as one, and can mix Google Slides, PowerPoint and PDF.
